@@ -2,13 +2,14 @@
 
 A Python pipeline that collects apartment asking prices, preserves observation history in PostgreSQL, and trains an XGBoost regression model to rank listings below its predicted asking price.
 
-**Current status:** offline tests passed with reproducible fictional data. A live Supabase PostgreSQL connection, table creation and rollback-only storage checks have also passed. The two tables have RLS enabled; test records were rolled back. Credentials are stored only in a local ignored `.env`; a fresh checkout needs its own database configuration. GitHub deployment still requires configuration. The ingestion adapter supports schema.org JSON-LD; no specific property portal has been integrated or verified yet. A real source must be inspected before enabling live collection.
+**Current status:** the first real-source pilot is verified: 120 available apartments in the Bemovo development, Warsaw, on 2026-10-05. Government CSV prices matched the developer's published apartment features and prices. All 120 observations were stored in Supabase and read back with matching prices/features. Source parsers and ingestion checks have offline tests; GitHub CI also tests PostgreSQL storage. A fresh checkout needs its own ignored `.env`. This is one development and one observation day, so there is no validated Warsaw-wide model yet. The daily production job remains disabled and is not connected to the pilot adapter.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    A[Public sale listings / saved HTML] --> B[curl_cffi + BeautifulSoup]
+    A[Government CSV + developer features] --> B[Source-specific validation + join]
+    K[Generic JSON-LD / saved HTML] --> B
     B --> C[(Supabase PostgreSQL)]
     C --> D[Validation + deduplication]
     D --> E[First observations: training]
@@ -17,7 +18,7 @@ flowchart LR
     G --> H[XGBoost + persisted preprocessor]
     H --> I[Price predictions + ranked candidates]
     F --> I
-    J[GitHub Actions] --> B
+    J[GitHub Actions: tests; production gated] -.-> B
 ```
 
 The browser impersonation profile is `chrome120`. This changes the HTTP/TLS client fingerprint; it does not execute JavaScript or guarantee that a website accepts requests. Responses such as 403/429 stop the fetch. The collector uses bounded pages/listings, timeouts, retries for transient failures and a delay between requests. [curl_cffi documentation](https://curl-cffi.readthedocs.io/en/v0.11.2/impersonate.html)
@@ -77,7 +78,31 @@ if (!(Test-Path .env)) { Copy-Item .env.example .env }
 
 Edit an existing `.env` instead of overwriting it. The runtime reads `DATABASE_URL`; an optional local helper value `SUPABASE_DB_PASSWORD` does not configure the connection automatically. Do not put credentials in source code, screenshots, issue descriptions or Git. `.env` is ignored; `.env.example` contains placeholders only.
 
-### 3. Verify an actual listing source
+### 3. Collect the verified Bemovo pilot
+
+The pilot uses the [GH Development 7 dataset on dane.gov.pl](https://dane.gov.pl/pl/dataset/39940) for gross apartment asking prices and the [public Bemovo website](https://bemovo.pl/pl/) for area, room count, floor and availability. It joins exact apartment numbers, checks the developer/address and price-validity interval, and compares prices between both sources. It excludes parking, extras and commercial units. Area comes from published apartment features; it is never reconstructed by dividing price by price per square metre.
+
+Run the local snapshot first; this command does not connect to PostgreSQL:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.fetch_bemovo
+```
+
+It writes `data/bemovo.csv` and `data/bemovo_audit.json`. The audit records source URLs, resource ID, source date, collection time, counts and content hashes. It rejects stale resources, missing apartment matches, invalid data and price differences above one grosz. Source failures leave the database untouched.
+
+After configuring your own database, store a verified snapshot as well:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.fetch_bemovo --save-db
+```
+
+Each successful run records its actual observation time. A later fetch is a new observation, even if the price is unchanged. No historical observations are fabricated from today's website. Build year and coordinates are unknown for this pilot and remain missing.
+
+See [docs/SOURCE_BEMOVO.md](docs/SOURCE_BEMOVO.md) for the source contract, reuse terms and limitations. The government dataset's CC0 label does not apply to the developer website. Raw website HTML and collected data are not committed to this repository.
+
+This first snapshot is useful for checking ingestion and EDA. Do not report a random apartment split from one development as Warsaw market performance. Next steps are more developments, genuine collection history and evaluation that holds out developments and time. Availability also needs to be represented in storage before producing daily candidate rankings: an older stored apartment is not automatically retired when it disappears from a later snapshot.
+
+#### Generic JSON-LD adapter
 
 Set `LISTINGS_URL` to a supported Warsaw **sale** listing page. The generic adapter expects structured apartment data containing `floorSize`, `numberOfRooms`, a Warsaw postal address and an `Offer` with price/currency PLN. It understands nested JSON-LD and linked graph objects, and follows bounded same-origin item/detail and pagination links. It does not guess CSS selectors for an unknown website.
 
@@ -91,7 +116,7 @@ First test parsing without touching the cloud database:
 
 Inspect the rows: sale rather than rent, PLN rather than price per square metre, total area, room count, stable IDs and canonical URLs. The generic parser rejects explicit rental offers; absent sale/rental metadata must be resolved by the source adapter and selected sale-search URL. A zero-record result fails clearly instead of silently updating the model with no data.
 
-Then run the live flow:
+For a separately verified JSON-LD source, run:
 
 ```powershell
 .\.venv\Scripts\python.exe -m src.fetch_data
@@ -101,9 +126,11 @@ Then run the live flow:
 
 The first snapshot will usually be insufficient for temporal evaluation. Collect history before using the default `temporal` split. For a clearly labelled exploratory check with at least 30 unique listings, use `python -m src.train --split group`. This does not measure performance on future listings.
 
-### 4. Publish the repository and enable GitHub Actions
+### 4. GitHub Actions
 
-Create an empty GitHub repository with default branch `main`. Upload/commit the **contents of this directory at the repository root**, so `.github/workflows/` is at the root. Include source, tests, notebook, README, requirements and `.env.example`; exclude `.env`, local databases, collected CSV files and model binaries.
+The project is published at [filip-skopczynski/real-estate-mlops](https://github.com/filip-skopczynski/real-estate-mlops). Source, tests, notebook, requirements and `.env.example` are tracked; credentials, local databases, collected CSV files and model binaries are excluded.
+
+CI runs on pushes and pull requests. Keep `PIPELINE_ENABLED` disabled for the Bemovo pilot: the current production job calls the generic JSON-LD adapter. Connecting the new adapter and handling apartment availability are separate next steps. The configuration below applies to a separately verified JSON-LD source.
 
 In repository **Settings → Secrets and variables → Actions**, configure:
 
@@ -134,7 +161,7 @@ Temporal evaluation keeps whole UTC days separate, approximately 60% training, 2
 
 For prediction `P` and asking price `A`, the discrepancy is `(P - A) / P`. A prediction of 1,000,000 PLN and asking price of 850,000 PLN yields 15%. The candidate CSV marks whether a listing was seen during training; discrepancies on training listings can be optimistic.
 
-Limitations: asking prices differ from completed transaction prices; missing property quality/features can explain apparent discounts. Listing-ID deduplication does not match the same property republished under another ID or on another portal. A latest observation does not prove a listing remains active. Temporal evaluation needs more than the minimum three days and 30 listings for a credible market conclusion. There is no drift monitoring, automatic model promotion, transactional artifact registry or source-specific portal adapter yet.
+Limitations: asking prices differ from completed transaction prices; missing property quality/features can explain apparent discounts. Listing-ID deduplication does not match the same property republished under another ID or on another portal. A latest observation does not prove a listing remains active. Temporal evaluation needs more than the minimum three days and 30 listings for a credible market conclusion. The verified source covers only one primary-market development. There is no drift monitoring, automatic model promotion or transactional artifact registry yet.
 
 ## Exploration and tests
 
@@ -148,9 +175,9 @@ Offline tests exercise parsing, bounded network behaviour, database history/idem
 
 ## Next portfolio milestones
 
-1. Verify and version one real data-source adapter with representative HTML fixtures.
-2. Collect enough history and report reproducible out-of-time performance and error slices by district/size.
-3. Improve cross-listing duplicate detection and property features before claiming deal quality.
+1. Add more verified developments and track availability in complete source snapshots.
+2. Connect daily ingestion, collect history and report performance on unseen developments and future listings, with error slices by district/size.
+3. Improve cross-listing duplicate detection and property features before claiming deal quality; evaluate transaction prices in a separate task.
 4. Add model version/promotion rules, data freshness checks and a small prediction API when the data/model are reliable.
 
 This version is a scheduled ML/data-engineering pipeline. An LLM agent that interprets results and invokes tools can be a later layer, after ingestion and model evaluation are reliable.
