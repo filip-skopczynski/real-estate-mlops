@@ -1,0 +1,16 @@
+curl_cffi==0.16.3
+beautifulsoup4==4.15.0
+SQLAlchemy==2.0.54
+psycopg2-binary==2.9.13
+pandas==2.3.3
+numpy==2.3.5
+scikit-learn==1.8.0
+# Shared tested version for Python 3.11 and 3.12 (3.4.1 requires 3.12).
+xgboost==3.2.0
+joblib==1.6.0
+python-dotenv==1.2.4
+matplotlib==3.10.9
+pytest==9.1.1
+nbformat==5.11.1
+ipykernel==7.4.0
+PyYAML==6.0.3

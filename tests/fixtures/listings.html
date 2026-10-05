@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="pl"><head><title>Synthetic offline sale fixture — not a real listing</title>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@id": "#apartment",
+      "@type": "Apartment",
+      "identifier": "APARTMENT-101",
+      "address": {"@type": "PostalAddress", "addressLocality": "Warszawa", "district": "Mokotów"},
+      "floorSize": {"@type": "QuantitativeValue", "value": "60,5", "unitCode": "MTK"},
+      "numberOfRooms": 3,
+      "numberOfBedrooms": 2,
+      "floorLevel": "2",
+      "yearBuilt": 2015,
+      "geo": {"@type": "GeoCoordinates", "latitude": "52,20", "longitude": "21,03"},
+      "offers": {"@id": "#offer"}
+    },
+    {
+      "@id": "#offer",
+      "@type": "Offer",
+      "price": "1 200 000,50 zł",
+      "priceCurrency": "PLN",
+      "businessFunction": "http://purl.org/goodrelations/v1#Sell",
+      "itemOffered": {"@id": "#apartment"}
+    },
+    {
+      "@id": "#listing",
+      "@type": "RealEstateListing",
+      "identifier": {"@type": "PropertyValue", "value": "SALE-101"},
+      "url": "/property/101?utm_source=offline&id=101",
+      "mainEntity": {"@id": "#apartment"},
+      "offers": {"@id": "#offer"}
+    }
+  ]
+}
+</script></head><body><p>Generated for parser tests only.</p></body></html>

@@ -1,0 +1,117 @@
+name: Warsaw listing pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 5 * * *' # 05:15 UTC, on the default branch
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pipeline_test
+          POSTGRES_PASSWORD: local_test_only
+          POSTGRES_DB: pipeline_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pipeline_test -d pipeline_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg2://pipeline_test:local_test_only@localhost:5432/pipeline_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pytest -q
+
+  pipeline:
+    needs: test
+    if: >-
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      github.ref == 'refs/heads/main' && vars.PIPELINE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: production-listing-pipeline
+      cancel-in-progress: false
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      LISTINGS_URL: ${{ vars.LISTINGS_URL }}
+      MAX_PAGES: ${{ vars.MAX_PAGES || '2' }}
+      MAX_LISTINGS: ${{ vars.MAX_LISTINGS || '100' }}
+      REQUEST_DELAY_SECONDS: ${{ vars.REQUEST_DELAY_SECONDS || '2' }}
+      TRAIN_SPLIT: ${{ vars.TRAIN_SPLIT || 'temporal' }}
+      DEAL_THRESHOLD: ${{ vars.DEAL_THRESHOLD || '0.15' }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Validate configuration
+        run: |
+          python - <<'PY'
+          import os
+          missing = [name for name in ('DATABASE_URL', 'LISTINGS_URL') if not os.environ.get(name)]
+          if missing:
+              raise SystemExit('Configure required secret/variable: ' + ', '.join(missing))
+          PY
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Initialize tables
+        run: python -m src.database init
+      - name: Fetch and persist observations
+        run: python -m src.fetch_data
+      - name: Prepare first and latest observations
+        run: python -m src.preprocess
+      - name: Check training readiness
+        id: readiness
+        run: |
+          python - <<'PY'
+          import os
+          import pandas as pd
+          from src.train import InsufficientDataError, split_data
+          try:
+              split_data(pd.read_csv('data/training.csv', dtype={'source': 'string', 'listing_id': 'string'}), mode=os.environ['TRAIN_SPLIT'])
+          except InsufficientDataError as error:
+              ready = False
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+                  summary.write('Observations saved. Training waits for more history: ' + str(error) + '\n')
+          else:
+              ready = True
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('ready=' + str(ready).lower() + '\n')
+          PY
+      - name: Train and score
+        if: steps.readiness.outputs.ready == 'true'
+        run: python -m src.train
+      - name: Upload model and report
+        if: steps.readiness.outputs.ready == 'true'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: price-model-${{ github.run_id }}
+          path: |
+            models/model.joblib
+            models/metrics.json
+            data/deals.csv
+          if-no-files-found: error
+          retention-days: 14
