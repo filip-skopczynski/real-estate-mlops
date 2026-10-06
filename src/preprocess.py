@@ -105,10 +105,19 @@ def clean_listings(frame: pd.DataFrame, keep: str = "earliest") -> pd.DataFrame:
     district = cleaned["district"].astype("string").str.strip().replace("", pd.NA)
     cleaned["district"] = district.astype(object).where(district.notna(), np.nan)
 
-    cleaned = cleaned.sort_values("observed_at", kind="stable")
+    order_column = "observed_at"
+    if keep == "latest" and "availability_observed_at" in cleaned:
+        status_time = pd.to_datetime(cleaned["availability_observed_at"], errors="coerce", utc=True, format="mixed")
+        if (cleaned["availability_observed_at"].notna() & status_time.isna()).any():
+            raise ValueError("Availability timestamps must be valid dates.")
+        cleaned["availability_observed_at"] = status_time
+        cleaned["_latest_order_at"] = status_time.where(status_time > cleaned["observed_at"], cleaned["observed_at"])
+        order_column = "_latest_order_at"
+    cleaned = cleaned.sort_values(order_column, kind="stable")
     cleaned = cleaned.drop_duplicates(
         IDENTITY_COLUMNS, keep="first" if keep == "earliest" else "last"
     ).reset_index(drop=True)
+    cleaned = cleaned.drop(columns="_latest_order_at", errors="ignore")
     # Useful for exploration; never supplied to the model because it contains the target.
     cleaned["price_per_m2"] = cleaned["price_pln"] / cleaned["area_m2"]
     cleaned.attrs["cleaning"] = {
@@ -118,6 +127,22 @@ def clean_listings(frame: pd.DataFrame, keep: str = "earliest") -> pd.DataFrame:
         "deduplication": keep,
     }
     return cleaned
+
+
+def filter_available_listings(frame: pd.DataFrame) -> pd.DataFrame:
+    """Exclude unavailable tracked units after selecting each latest state.
+
+    Price-history training retains sold units. Legacy sources without status
+    tracking keep their existing behaviour; an unknown explicit status fails.
+    """
+    if "availability_status" not in frame:
+        return frame.copy()
+    status = frame["availability_status"].astype("string").str.strip().str.casefold()
+    if (status.notna() & ~status.isin(["available", "reserved", "sold", "missing"])).any():
+        raise ValueError("Unknown apartment availability status.")
+    result = frame.loc[status.isna() | status.eq("available")].copy()
+    result.attrs["excluded_unavailable"] = len(frame) - len(result)
+    return result.reset_index(drop=True)
 
 
 def main() -> None:
@@ -137,9 +162,9 @@ def main() -> None:
 
             engine = get_engine()
             raw = read_observations(engine)
-            latest_raw = read_current_listings(engine)
+            latest_raw = read_current_listings(engine, available_only=True)
         training = clean_listings(raw, keep="earliest")
-        latest = clean_listings(latest_raw, keep="latest")
+        latest = filter_available_listings(clean_listings(latest_raw, keep="latest"))
         if training.empty:
             raise ValueError("No valid Warsaw listings remain after cleaning.")
         for target, frame in [(args.output, training), (args.latest_output, latest)]:

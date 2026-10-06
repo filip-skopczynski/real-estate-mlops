@@ -243,7 +243,7 @@ def test_collection_reads_four_public_resources_without_network(monkeypatch):
         assert options["timeout"] == 30
         assert options["allow_redirects"] is False
         assert options["impersonate"] == "chrome120"
-    price_parser.assert_called_once_with("synthetic csv", as_of_date=SNAPSHOT_DATE)
+    price_parser.assert_called_once_with("synthetic csv", as_of_date=SNAPSHOT_DATE, allow_empty=True)
     feature_parser.assert_called_once_with("<html>synthetic homepage</html>")
     assert report["resource_id"] == "synthetic-resource"
     assert len(report["csv_sha256"]) == len(report["html_sha256"]) == 64

@@ -227,7 +227,9 @@ def score_listings(frame: pd.DataFrame, artifact: dict, discount_threshold: floa
     """
     if not np.isfinite(discount_threshold) or not 0 <= discount_threshold < 1:
         raise ValueError("Discount threshold must be a finite fraction from 0 to less than 1.")
-    result = clean_listings(frame, keep="latest")
+    from src.preprocess import filter_available_listings
+
+    result = filter_available_listings(clean_listings(frame, keep="latest"))
     if result.empty:
         result["predicted_price_pln"] = pd.Series(dtype=float)
         result["discount"] = pd.Series(dtype=float)

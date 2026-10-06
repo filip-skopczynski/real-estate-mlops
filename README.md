@@ -1,8 +1,8 @@
 # Warsaw Real-Estate Deal Hunter
 
-A Python pipeline that collects apartment asking prices, preserves observation history in PostgreSQL, and trains an XGBoost regression model to rank listings below its predicted asking price.
+A Python pipeline that collects apartment asking prices, preserves price and availability history in PostgreSQL, and trains an XGBoost regression model to rank available listings below its predicted asking price.
 
-**Current status:** the first real-source pilot is verified: 120 available apartments in the Bemovo development, Warsaw, on 2026-10-05. Government CSV prices matched the developer's published apartment features and prices. All 120 observations were stored in Supabase and read back with matching prices/features. Source parsers and ingestion checks have offline tests; GitHub CI also tests PostgreSQL storage. A fresh checkout needs its own ignored `.env`. This is one development and one observation day, so there is no validated Warsaw-wide model yet. The daily production job remains disabled and is not connected to the pilot adapter.
+**Current status:** the first real-source price pilot was verified on 2026-10-05: 120 available Bemovo apartments in Warsaw, stored in Supabase and checked by reading them back. On 2026-10-06, a separate live availability capture stored 120 available and three sold residential units, excluding two commercial units. No prices or price timestamps were changed; the government price feed was still dated 2026-10-05. The pilot supports atomic price/availability snapshots and excludes unavailable tracked apartments from candidate scoring. Source parsers and ingestion checks have offline tests; GitHub CI also tests PostgreSQL storage. A fresh checkout needs its own ignored `.env`. One development and one day of price history do not establish Warsaw-wide model quality. The daily production job remains disabled and is not connected to the pilot adapter.
 
 ## Architecture
 
@@ -10,10 +10,10 @@ A Python pipeline that collects apartment asking prices, preserves observation h
 flowchart LR
     A[Government CSV + developer features] --> B[Source-specific validation + join]
     K[Generic JSON-LD / saved HTML] --> B
-    B --> C[(Supabase PostgreSQL)]
+    B --> C[(PostgreSQL: prices + availability)]
     C --> D[Validation + deduplication]
     D --> E[First observations: training]
-    D --> F[Latest observations: candidates]
+    D --> F[Available latest observations: candidates]
     E --> G[Train / validation / test]
     G --> H[XGBoost + persisted preprocessor]
     H --> I[Price predictions + ranked candidates]
@@ -48,7 +48,7 @@ This creates 200 fictional observations of 180 apartments over multiple days. It
 | File | Meaning |
 | --- | --- |
 | `data/training.csv` | Earliest valid observation for each listing |
-| `data/latest.csv` | Latest valid observation for each listing |
+| `data/latest.csv` | Latest valid observation, excluding unavailable apartments where statuses are tracked |
 | `models/model.joblib` | Fitted preprocessor, model and metadata |
 | `models/metrics.json` | Validation/test metrics, baseline and split provenance |
 | `data/deals.csv` | Ranked candidates above the discrepancy threshold |
@@ -88,7 +88,7 @@ Run the local snapshot first; this command does not connect to PostgreSQL:
 .\.venv\Scripts\python.exe -m src.fetch_bemovo
 ```
 
-It writes `data/bemovo.csv` and `data/bemovo_audit.json`. The audit records source URLs, resource ID, source date, collection time, counts and content hashes. It rejects stale resources, missing apartment matches, invalid data and price differences above one grosz. Source failures leave the database untouched.
+It writes available apartment prices to `data/bemovo.csv` and the audit to `data/bemovo_audit.json`. The audit records source URLs, resource ID, source date, collection time, counts, content hashes and the full residential inventory with `available`, `reserved` or `sold` statuses. Commercial units are excluded from this inventory. Stale resources, missing apartment matches, invalid data and price differences above one grosz stop collection before any price or availability records are changed.
 
 After configuring your own database, store a verified snapshot as well:
 
@@ -96,11 +96,25 @@ After configuring your own database, store a verified snapshot as well:
 .\.venv\Scripts\python.exe -m src.fetch_bemovo --save-db
 ```
 
-Each successful run records its actual observation time. A later fetch is a new observation, even if the price is unchanged. No historical observations are fabricated from today's website. Build year and coordinates are unknown for this pilot and remain missing.
+With `--save-db`, one transaction saves the available prices and the complete residential inventory. The audit then includes `database_availability_counts`. A first-seen sold or reserved apartment gets a status record without an invented price. A complete inventory containing only sold/reserved apartments is valid and produces no available-price rows; an empty or incomplete catalogue is rejected.
+
+Each successful capture records its actual observation time. In price mode, a later fetch is a new price observation, even if the price is unchanged. No historical observations are fabricated from today's website. Build year and coordinates are unknown for this pilot and remain missing. Running `src.database init` adds any missing availability tables without altering or deleting existing price tables.
+
+#### Refresh availability separately
+
+The default price collection requires the government resource to match the current Warsaw date. For a 2026-10-06 capture, a latest resource dated 2026-10-05 fails that rule and leaves saved records unchanged. Availability can be refreshed independently from the verified public residential catalogue:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.fetch_bemovo --availability-only
+# Also save the verified status snapshot to your configured database:
+.\.venv\Scripts\python.exe -m src.fetch_bemovo --availability-only --save-db
+```
+
+This mode reads one public homepage HTML page and validates the full residential catalogue. It writes `data/bemovo_availability.csv` and `data/bemovo_availability_audit.json`. It preserves `data/bemovo.csv` and its price audit, reads no government CSV and performs no price comparison. With `--save-db`, it atomically updates availability and the capture header without adding price observations. Stored asking prices and their observation times remain unchanged.
 
 See [docs/SOURCE_BEMOVO.md](docs/SOURCE_BEMOVO.md) for the source contract, reuse terms and limitations. The government dataset's CC0 label does not apply to the developer website. Raw website HTML and collected data are not committed to this repository.
 
-This first snapshot is useful for checking ingestion and EDA. Do not report a random apartment split from one development as Warsaw market performance. Next steps are more developments, genuine collection history and evaluation that holds out developments and time. Availability also needs to be represented in storage before producing daily candidate rankings: an older stored apartment is not automatically retired when it disappears from a later snapshot.
+This first snapshot is useful for checking ingestion and EDA. Do not report a random apartment split from one development as Warsaw market performance. Next steps are more developments, genuine collection history and evaluation that holds out developments and time, followed by connecting the pilot to daily ingestion.
 
 #### Generic JSON-LD adapter
 
@@ -116,6 +130,8 @@ First test parsing without touching the cloud database:
 
 Inspect the rows: sale rather than rent, PLN rather than price per square metre, total area, room count, stable IDs and canonical URLs. The generic parser rejects explicit rental offers; absent sale/rental metadata must be resolved by the source adapter and selected sale-search URL. A zero-record result fails clearly instead of silently updating the model with no data.
 
+The generic adapter does not supply a complete inventory or availability statuses. Its price-only ingestion keeps the previous behaviour: disappearance does not retire a listing. Such untracked listings remain eligible for scoring; availability filtering applies only where a source supplies verified statuses.
+
 For a separately verified JSON-LD source, run:
 
 ```powershell
@@ -130,7 +146,7 @@ The first snapshot will usually be insufficient for temporal evaluation. Collect
 
 The project is published at [filip-skopczynski/real-estate-mlops](https://github.com/filip-skopczynski/real-estate-mlops). Source, tests, notebook, requirements and `.env.example` are tracked; credentials, local databases, collected CSV files and model binaries are excluded.
 
-CI runs on pushes and pull requests. Keep `PIPELINE_ENABLED` disabled for the Bemovo pilot: the current production job calls the generic JSON-LD adapter. Connecting the new adapter and handling apartment availability are separate next steps. The configuration below applies to a separately verified JSON-LD source.
+CI runs on pushes and pull requests. Keep `PIPELINE_ENABLED` disabled for the Bemovo pilot: the current production job calls the generic JSON-LD adapter. Availability storage is implemented, but connecting the pilot to the daily job remains a separate next step. The configuration below applies to a separately verified JSON-LD source.
 
 In repository **Settings → Secrets and variables → Actions**, configure:
 
@@ -151,9 +167,21 @@ The cron expression runs daily at **05:15 UTC** (06:15/07:15 in Warsaw depending
 
 ## Data and model design
 
-`listings` stores the current state keyed by `(source, listing_id)`. `listing_observations` stores historical snapshots keyed by `(source, listing_id, observed_at)`. Both are updated in one transaction. Repeating the same observation is idempotent; an older observation cannot roll the current price backwards. `first_seen_at` and `last_seen_at` preserve collection history. Observations record **fetch time**, not an unverified publication date.
+`listings` stores the latest known asking price keyed by `(source, listing_id)`. `listing_observations` stores price history keyed by `(source, listing_id, observed_at)`. Older price observations cannot roll the current price backwards. These tables retain historical prices when an apartment becomes unavailable; a sold status never converts its asking price into a transaction price. Observations record **fetch time**, not an unverified publication date.
 
-Preprocessing validates Warsaw, positive finite prices/areas, integer room counts and observation dates. Optional missing values are imputed in the model. Distance is straight-line distance from the configured Warsaw reference point, not travel time. Training uses the earliest valid observation per source/listing ID; candidate scoring uses the latest.
+Three additional tables separate inventory checks from price history:
+
+| Table | Purpose |
+| --- | --- |
+| `inventory_snapshots` | Successful complete captures, identified by source, scope and UTC capture time; `prices_complete` distinguishes price/status and status-only captures |
+| `listing_availability` | Latest `available`, `reserved`, `sold` or `missing` status |
+| `listing_availability_observations` | Status history, including catalogue disappearances and reappearances |
+
+`save_inventory_snapshot` commits supplied prices, statuses and the capture header atomically. It requires a validated complete residential catalogue. The default `prices_complete=True` requires available IDs to exactly match price IDs. The availability-only CLI supplies no prices and uses `prices_complete=False`, retaining the same completeness, scope, time and replay checks for statuses. Only previously seen IDs within that capture's source/scope/prefix can become `missing`; this means absent from the catalogue, **not confirmed sold**. Reappearing apartments can become available again. An identical replay is a no-op, changed contents at the same UTC time fail, and a new capture older than the latest capture is rejected. Invalid or incomplete snapshots leave existing price and status records unchanged.
+
+`read_current_listings(..., available_only=True)` excludes tracked sold, reserved and missing apartments. Price `last_seen_at` describes the last price observation; availability `last_seen_at` describes the last presence in the full catalogue, including sold/reserved units. Neither timestamp alone proves present-day availability.
+
+Preprocessing validates Warsaw, positive finite prices/areas, integer room counts and observation dates. Optional missing values are imputed in the model. Distance is straight-line distance from the configured Warsaw reference point, not travel time. Training uses the earliest valid price observation per source/listing ID, including historical asking prices of apartments later sold. Latest-row preprocessing and candidate scoring exclude tracked sold, reserved and missing apartments.
 
 The model uses area, rooms, district, distance, floor, build year and coordinates. `price_per_m2` is available for EDA only and is excluded from predictors because it contains the target. Imputation and categorical encoding are fitted on training data only. Unseen districts are handled by the encoder.
 
@@ -161,7 +189,7 @@ Temporal evaluation keeps whole UTC days separate, approximately 60% training, 2
 
 For prediction `P` and asking price `A`, the discrepancy is `(P - A) / P`. A prediction of 1,000,000 PLN and asking price of 850,000 PLN yields 15%. The candidate CSV marks whether a listing was seen during training; discrepancies on training listings can be optimistic.
 
-Limitations: asking prices differ from completed transaction prices; missing property quality/features can explain apparent discounts. Listing-ID deduplication does not match the same property republished under another ID or on another portal. A latest observation does not prove a listing remains active. Temporal evaluation needs more than the minimum three days and 30 listings for a credible market conclusion. The verified source covers only one primary-market development. There is no drift monitoring, automatic model promotion or transactional artifact registry yet.
+Limitations: asking prices differ from completed transaction prices; missing property quality/features can explain apparent discounts. Listing-ID deduplication does not match the same property republished under another ID or on another portal. Availability describes the last successful complete capture, not changes since then; generic sources without status tracking cannot retire disappeared apartments. Temporal evaluation needs more than the minimum three days and 30 listings for a credible market conclusion. The verified source covers only one primary-market development. There is no drift monitoring, automatic model promotion or transactional artifact registry yet.
 
 ## Exploration and tests
 
@@ -171,13 +199,13 @@ Open `notebooks/01_eda.ipynb` in VS Code and select the project's Python environ
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Offline tests exercise parsing, bounded network behaviour, database history/idempotence, invalid records, leakage boundaries, unknown categories, model serialization and the complete fixture-to-model path. PostgreSQL integration tests also run when `TEST_DATABASE_URL` points at an **isolated test database**. Do not use a production Supabase database for the test suite.
+Offline tests exercise parsing, bounded network behaviour, database price history/idempotence, invalid records, leakage boundaries, unknown categories, model serialization and the complete fixture-to-model path. PostgreSQL integration tests also run when `TEST_DATABASE_URL` points at an **isolated test database**. Do not use a production Supabase database for the test suite.
 
 ## Next portfolio milestones
 
-1. Add more verified developments and track availability in complete source snapshots.
-2. Connect daily ingestion, collect history and report performance on unseen developments and future listings, with error slices by district/size.
+1. Add more verified developments with complete residential inventories and stable scope identifiers.
+2. Connect the pilot's price/availability ingestion to the daily job, collect history and report performance on unseen developments and future listings, with error slices by district/size.
 3. Improve cross-listing duplicate detection and property features before claiming deal quality; evaluate transaction prices in a separate task.
 4. Add model version/promotion rules, data freshness checks and a small prediction API when the data/model are reliable.
 
-This version is a scheduled ML/data-engineering pipeline. An LLM agent that interprets results and invokes tools can be a later layer, after ingestion and model evaluation are reliable.
+The project has CI and a gated scheduling configuration; the verified pilot currently runs manually. An LLM agent that interprets results and invokes tools can be a later layer, after ingestion and model evaluation are reliable.

@@ -75,6 +75,21 @@ def test_parking_and_extras_are_skipped_instead_of_added_to_apartment_price():
     assert parsed[0]["price_pln"] == 900000.50
 
 
+def test_verified_extras_only_feed_can_support_a_full_sold_out_catalogue():
+    extra = apartment(**{HEADERS["property_type"]: "X", HEADERS["unit_number"]: "X",
+                         BASE_PRICE_HEADER: "X", DIAGNOSTIC_HEADER: "X"})
+    text = csv_fixture([extra])
+    with pytest.raises(ValueError):
+        parse_bemovo_prices(text, as_of_date=AS_OF)
+    assert parse_bemovo_prices(text, as_of_date=AS_OF, allow_empty=True) == []
+    header_only = csv_fixture([], headers=list(extra))
+    with pytest.raises(ValueError):
+        parse_bemovo_prices(header_only, as_of_date=AS_OF, allow_empty=True)
+    wrong_source = {**extra, HEADERS["nip"]: "9999999999"}
+    with pytest.raises(ValueError, match="context"):
+        parse_bemovo_prices(csv_fixture([wrong_source]), as_of_date=AS_OF, allow_empty=True)
+
+
 def test_houses_and_unknown_property_types_are_explicitly_rejected():
     for kind in ["Dom jednorodzinny", "Unknown", "Lokal mieszkalny — promocja"]:
         with pytest.raises(ValueError, match="houses|property type"):

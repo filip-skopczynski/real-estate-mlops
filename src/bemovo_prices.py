@@ -80,13 +80,14 @@ def _aware_timestamp(value: str, field: str, row_number: int) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def parse_bemovo_prices(csv_text: str, *, as_of_date: date) -> list[dict]:
+def parse_bemovo_prices(csv_text: str, *, as_of_date: date, allow_empty: bool = False) -> list[dict]:
     """Return validated Bemovo apartment base prices applicable on a Warsaw day.
 
     Every included apartment must pass all checks; invalid included records fail
     the whole resource. Only exact excluded property types are skipped. The
     caller must additionally check validity at the actual observation instant.
     Returned timestamps are aware UTC values. price_per_m2_pln is diagnostic.
+    allow_empty permits a verified extras-only resource; blank files still fail.
     """
     if not isinstance(csv_text, str) or "\x00" in csv_text:
         raise ValueError("The apartment resource must be CSV text without NUL bytes.")
@@ -121,14 +122,6 @@ def parse_bemovo_prices(csv_text: str, *, as_of_date: date) -> list[dict]:
     for row_number, row in enumerate(rows, start=2):
         if None in row or any(value is None for value in row.values()):
             raise ValueError(f"Row {row_number}: CSV values do not match the header count.")
-        property_type = row[HEADERS["property_type"]].strip()
-        if property_type in EXCLUDED_TYPES:
-            continue
-        if property_type.casefold() == "dom jednorodzinny":
-            raise ValueError(f"Row {row_number}: houses are not supported by the apartment adapter.")
-        if property_type != "Lokal mieszkalny":
-            raise ValueError(f"Row {row_number}: unexpected property type in the apartment resource.")
-
         nip = row[HEADERS["nip"]].strip()
         developer_url = row[HEADERS["developer_url"]].strip()
         try:
@@ -151,6 +144,14 @@ def parse_bemovo_prices(csv_text: str, *, as_of_date: date) -> list[dict]:
             or building != EXPECTED_BUILDING
         ):
             raise ValueError(f"Row {row_number}: unexpected developer or project address context.")
+
+        property_type = row[HEADERS["property_type"]].strip()
+        if property_type in EXCLUDED_TYPES:
+            continue
+        if property_type.casefold() == "dom jednorodzinny":
+            raise ValueError(f"Row {row_number}: houses are not supported by the apartment adapter.")
+        if property_type != "Lokal mieszkalny":
+            raise ValueError(f"Row {row_number}: unexpected property type in the apartment resource.")
 
         unit = row[HEADERS["unit_number"]].strip()
         if not re.fullmatch(r"[AB][0-3]/[0-9]{2}", unit):
@@ -186,6 +187,6 @@ def parse_bemovo_prices(csv_text: str, *, as_of_date: date) -> list[dict]:
             "developer_nip": EXPECTED_NIP,
             "developer_url": developer_url,
         })
-    if not result:
+    if not result and not (allow_empty and rows):
         raise ValueError("The resource contains no validated apartment prices.")
     return result

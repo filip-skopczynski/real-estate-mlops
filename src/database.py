@@ -26,6 +26,7 @@ from sqlalchemy import (
     create_engine,
     func,
     inspect,
+    or_,
     select,
     text,
 )
@@ -120,7 +121,12 @@ def get_engine(database_url: str | None = None) -> Engine:
 
 def init_db(engine: Engine) -> None:
     """Create missing tables without replacing existing data."""
-    metadata.create_all(engine)
+    # Additive availability tables share this metadata; no old table is altered.
+    from src import availability
+
+    # `python -m src.database` runs this file as __main__; use the canonical
+    # imported module's metadata so the availability tables are included too.
+    availability.inventory_snapshots.metadata.create_all(engine)
 
 
 def _utc_timestamp(value: Any) -> datetime:
@@ -173,58 +179,62 @@ def _normalize_listing(row: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def upsert_listings(engine: Engine, rows: list[dict[str, Any]]) -> int:
-    """Atomically save history and current state; return new observation count.
-
-    The first payload for a given source, listing_id and timestamp is retained.
-    Repeating it is idempotent. Older observations extend history and first_seen,
-    but cannot replace the latest price or features. Database errors propagate.
-    """
-    if not rows:
-        return 0
-    normalized = [_normalize_listing(row) for row in rows]
+def _upsert_normalized(connection, normalized: list[dict[str, Any]]) -> int:
+    """Save validated prices using the caller's transaction."""
     inserts = {"postgresql": postgres_insert, "sqlite": sqlite_insert}
     try:
-        dialect_insert = inserts[engine.dialect.name]
+        dialect_insert = inserts[connection.dialect.name]
     except KeyError:
         raise ValueError("Upsert obsługuje PostgreSQL i SQLite.") from None
 
     added = 0
-    with engine.begin() as connection:
-        for row in normalized:
-            history_insert = dialect_insert(listing_observations).values(**row)
-            history_insert = history_insert.on_conflict_do_nothing(
-                index_elements=["source", "listing_id", "observed_at"]
-            )
-            result = connection.execute(history_insert)
-            if result.rowcount == 0:
-                continue
-            added += 1
+    for row in normalized:
+        history_insert = dialect_insert(listing_observations).values(**row)
+        history_insert = history_insert.on_conflict_do_nothing(
+            index_elements=["source", "listing_id", "observed_at"]
+        )
+        result = connection.execute(history_insert)
+        if result.rowcount == 0:
+            continue
+        added += 1
 
-            current = {field: row[field] for field in LISTING_FIELDS}
-            current["first_seen_at"] = row["observed_at"]
-            current["last_seen_at"] = row["observed_at"]
-            current_insert = dialect_insert(listings).values(**current)
-            incoming = current_insert.excluded
-            is_latest = incoming.last_seen_at >= listings.c.last_seen_at
-            updates = {
-                field: case((is_latest, incoming[field]), else_=listings.c[field])
-                for field in LISTING_FIELDS
-                if field not in {"source", "listing_id"}
-            }
-            updates["first_seen_at"] = case(
-                (incoming.first_seen_at < listings.c.first_seen_at, incoming.first_seen_at),
-                else_=listings.c.first_seen_at,
+        current = {field: row[field] for field in LISTING_FIELDS}
+        current["first_seen_at"] = row["observed_at"]
+        current["last_seen_at"] = row["observed_at"]
+        current_insert = dialect_insert(listings).values(**current)
+        incoming = current_insert.excluded
+        is_latest = incoming.last_seen_at >= listings.c.last_seen_at
+        updates = {
+            field: case((is_latest, incoming[field]), else_=listings.c[field])
+            for field in LISTING_FIELDS
+            if field not in {"source", "listing_id"}
+        }
+        updates["first_seen_at"] = case(
+            (incoming.first_seen_at < listings.c.first_seen_at, incoming.first_seen_at),
+            else_=listings.c.first_seen_at,
+        )
+        updates["last_seen_at"] = case(
+            (is_latest, incoming.last_seen_at), else_=listings.c.last_seen_at
+        )
+        connection.execute(
+            current_insert.on_conflict_do_update(
+                index_elements=["source", "listing_id"], set_=updates
             )
-            updates["last_seen_at"] = case(
-                (is_latest, incoming.last_seen_at), else_=listings.c.last_seen_at
-            )
-            connection.execute(
-                current_insert.on_conflict_do_update(
-                    index_elements=["source", "listing_id"], set_=updates
-                )
-            )
+        )
     return added
+
+
+def upsert_listings(engine: Engine, rows: list[dict[str, Any]]) -> int:
+    """Atomically save price history and current prices without inferring status.
+
+    Repeating a source/ID/timestamp is idempotent; older prices cannot overwrite
+    newer ones. Partial or generic ingestion never retires or reactivates units.
+    """
+    if not rows:
+        return 0
+    normalized = [_normalize_listing(row) for row in rows]
+    with engine.begin() as connection:
+        return _upsert_normalized(connection, normalized)
 
 
 def _read_table(engine: Engine, table: Table, timestamps: tuple[str, ...]) -> pd.DataFrame:
@@ -243,9 +253,33 @@ def read_observations(engine: Engine) -> pd.DataFrame:
     return _read_table(engine, listing_observations, ("observed_at",))
 
 
-def read_current_listings(engine: Engine) -> pd.DataFrame:
-    """Return current listings; observed_at aliases UTC last_seen_at."""
-    frame = _read_table(engine, listings, ("first_seen_at", "last_seen_at"))
+def read_current_listings(engine: Engine, available_only: bool = False) -> pd.DataFrame:
+    """Return last prices with separately observed availability.
+
+    Legacy sources without inventory tracking retain their previous behaviour.
+    For tracked units, available_only excludes sold, reserved and missing units.
+    The price timestamp is not replaced by the status-check timestamp.
+    """
+    from src.availability import listing_availability
+
+    availability = listing_availability
+    query = select(
+        listings,
+        availability.c.status.label("availability_status"),
+        availability.c.observed_at.label("availability_observed_at"),
+        availability.c.last_seen_at.label("availability_last_seen_at"),
+    ).select_from(listings.outerjoin(availability, (
+        (listings.c.source == availability.c.source)
+        & (listings.c.listing_id == availability.c.listing_id)
+    )))
+    if available_only:
+        query = query.where(or_(availability.c.status == "available", availability.c.status.is_(None)))
+    query = query.order_by(listings.c.last_seen_at, listings.c.source, listings.c.listing_id)
+    with engine.connect() as connection:
+        frame = pd.read_sql(query, connection)
+    frame.columns = [str(column) for column in frame.columns]
+    for column in ("first_seen_at", "last_seen_at", "availability_observed_at", "availability_last_seen_at"):
+        frame[column] = pd.to_datetime(frame[column], utc=True)
     frame["observed_at"] = frame["last_seen_at"].copy()
     return frame
 
@@ -261,15 +295,21 @@ def main(argv: list[str] | None = None) -> int:
             init_db(engine)
             print(f"Baza gotowa ({engine.dialect.name}).")
         else:
+            from src.availability import inventory_snapshots, listing_availability
+
             with engine.connect() as connection:
                 connection.execute(text("SELECT 1"))
                 database = inspect(connection)
-                if not all(database.has_table(table.name) for table in (listings, listing_observations)):
+                if not all(database.has_table(table.name) for table in inventory_snapshots.metadata.tables.values()):
                     print("Brakuje tabel. Uruchom: python -m src.database init", file=sys.stderr)
                     return 1
                 current_count = connection.scalar(select(func.count()).select_from(listings))
                 history_count = connection.scalar(select(func.count()).select_from(listing_observations))
+                status_counts = dict(connection.execute(select(
+                    listing_availability.c.status, func.count()
+                ).group_by(listing_availability.c.status)).all())
             print(f"Połączenie działa. Oferty: {current_count}; obserwacje: {history_count}.")
+            print(f"Śledzona dostępność: {status_counts}.")
         return 0
     except OperationalError:
         print("Nie udało się połączyć z bazą. Sprawdź host, port, SSL i dane dostępu.", file=sys.stderr)

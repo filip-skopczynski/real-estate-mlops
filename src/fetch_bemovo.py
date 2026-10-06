@@ -30,6 +30,8 @@ DATASET_ID = "39940"
 DATASET_URL = f"https://api.dane.gov.pl/1.4/datasets/{DATASET_ID}"
 RESOURCE_URL = DATASET_URL + "/resources?per_page=1&sort=-data_date"
 FEATURES_URL = "https://bemovo.pl/pl/"
+INVENTORY_SCOPE = "Bemovo PH1"
+LISTING_ID_PREFIX = "5252801624:" + INVENTORY_SCOPE + ":"
 WARSAW = ZoneInfo("Europe/Warsaw")
 ALLOWED_HOSTS = {"api.dane.gov.pl", "dane.rejestr-cen-nieruchomosci.pl", "bemovo.pl"}
 MAX_BYTES = 5_000_000
@@ -45,6 +47,28 @@ def _timestamp(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _inventory(features, *, prices_complete=True):
+    residential = [row for row in features if not row["is_commercial_unit"]]
+    if not residential:
+        raise BemovoError("The source contains no residential apartment inventory.")
+    if len({row["number"] for row in features}) != len(features):
+        raise BemovoError("Duplicate apartment identities prevent a reliable inventory.")
+    for feature in residential:
+        if feature["city"] != "Warszawa" or feature["investment"] != INVENTORY_SCOPE:
+            raise BemovoError("The apartment belongs to an unexpected city or project.")
+        if feature["status"] not in {"available", "reserved", "sold"}:
+            raise BemovoError("The source reports an unknown apartment availability status.")
+    return {
+        "source": "dane.gov.pl:39940", "scope": INVENTORY_SCOPE,
+        "listing_id_prefix": LISTING_ID_PREFIX, "complete": True,
+        "prices_complete": prices_complete,
+        "apartments": [
+            {"listing_id": LISTING_ID_PREFIX + row["number"], "status": row["status"]}
+            for row in sorted(residential, key=lambda item: item["number"])
+        ],
+    }
+
+
 def combine_bemovo_records(prices, features, *, observed_at: datetime, snapshot_date: date):
     """Require a complete, consistent available inventory before emitting rows."""
     observed_at = _timestamp(observed_at)
@@ -54,13 +78,12 @@ def combine_bemovo_records(prices, features, *, observed_at: datetime, snapshot_
     feature_index = {row["number"]: row for row in features}
     if len(price_index) != len(prices) or len(feature_index) != len(features):
         raise BemovoError("Duplicate apartment identities prevent a reliable join.")
-    if not prices or not features:
-        raise BemovoError("The source contains no apartment prices or features.")
+    if not features:
+        raise BemovoError("The source contains no apartment features.")
     if set(price_index) - set(feature_index):
         raise BemovoError("Some government apartments have no matching website features.")
     available = [row for row in features if row["status"] == "available" and not row["is_commercial_unit"]]
-    if not available:
-        raise BemovoError("No available residential apartments were found.")
+    inventory = _inventory(features)
     if {row["number"] for row in available} - set(price_index):
         raise BemovoError("Some available apartments have no government price.")
     records = []
@@ -80,7 +103,7 @@ def combine_bemovo_records(prices, features, *, observed_at: datetime, snapshot_
             raise BemovoError("Government and website apartment prices disagree.")
         records.append({
             "source": "dane.gov.pl:39940",
-            "listing_id": "5252801624:Bemovo PH1:" + unit,
+            "listing_id": LISTING_ID_PREFIX + unit,
             "url": feature["feature_url"],
             "city": "Warszawa", "district": "Bemowo",
             "price_pln": price["price_pln"],
@@ -100,6 +123,7 @@ def combine_bemovo_records(prices, features, *, observed_at: datetime, snapshot_
         "missing_optional_features": ["build_year", "latitude", "longitude", "distance_km"],
         "area_provenance": "website area; never reconstructed from price",
         "scope": "one investment; not a validation of Warsaw-wide prediction quality",
+        "inventory": inventory,
     }
     return records, report
 
@@ -150,13 +174,29 @@ def _read_text(session, url, *, delay, sleep):
     raise BemovoError("The source could not be read.")
 
 
-def collect_bemovo(*, session=None, delay=2.0, sleep=time.sleep, observed_at=None):
+def collect_bemovo(*, session=None, delay=2.0, sleep=time.sleep, observed_at=None, availability_only=False):
     """Read public metadata, one CSV and one HTML page; never run website JS."""
     if not math.isfinite(delay) or delay < 0:
         raise BemovoError("Request delay must be finite and non-negative.")
     own_session = session is None
     session = session or requests.Session()
     try:
+        if availability_only:
+            html = _read_text(session, FEATURES_URL, delay=delay, sleep=sleep)
+            features = parse_bemovo_features(html)
+            captured_at = _timestamp(observed_at or datetime.now(timezone.utc))
+            return [], {
+                "collection_mode": "availability_only", "observed_at": captured_at.isoformat(),
+                "capture_date": captured_at.astimezone(WARSAW).date().isoformat(),
+                "features_url": FEATURES_URL,
+                "html_sha256": hashlib.sha256(html.encode("utf-8")).hexdigest(),
+                "website_units": len(features),
+                "website_status_counts": {status: sum(row["status"] == status for row in features)
+                                          for status in sorted({row["status"] for row in features})},
+                "website_commercial_units": sum(row["is_commercial_unit"] for row in features),
+                "price_collection": "not requested; existing price observations retain their timestamps",
+                "inventory": _inventory(features, prices_complete=False),
+            }
         dataset = json.loads(_read_text(session, DATASET_URL, delay=delay, sleep=sleep))["data"]
         if str(dataset["id"]) != DATASET_ID or dataset["attributes"].get("license_name") != "CC0 1.0":
             raise BemovoError("The dataset identity or published reuse terms changed.")
@@ -175,7 +215,7 @@ def collect_bemovo(*, session=None, delay=2.0, sleep=time.sleep, observed_at=Non
         csv_text = _read_text(session, csv_url, delay=delay, sleep=sleep)
         html = _read_text(session, FEATURES_URL, delay=delay, sleep=sleep)
         captured_at = _timestamp(observed_at or datetime.now(timezone.utc))
-        prices = parse_bemovo_prices(csv_text, as_of_date=snapshot_date)
+        prices = parse_bemovo_prices(csv_text, as_of_date=snapshot_date, allow_empty=True)
         features = parse_bemovo_features(html)
         records, report = combine_bemovo_records(prices, features, observed_at=captured_at, snapshot_date=snapshot_date)
         report.update({
@@ -203,33 +243,67 @@ def _write_snapshot(records, report, output, report_output):
     report_output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _write_availability_snapshot(report, output, report_output):
+    output.parent.mkdir(parents=True, exist_ok=True)
+    report_output.parent.mkdir(parents=True, exist_ok=True)
+    inventory = report["inventory"]
+    with output.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=["source", "listing_id", "scope", "status", "observed_at"])
+        writer.writeheader()
+        writer.writerows({**row, "source": inventory["source"], "scope": inventory["scope"],
+                          "observed_at": report["observed_at"]} for row in inventory["apartments"])
+    report_output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def main(argv=None):
     load_dotenv(PROJECT_ROOT / ".env", override=False)
     parser = argparse.ArgumentParser(description="Sprawdź i pobierz kompletne mieszkania pilotażowej inwestycji Bemovo.")
-    parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "data" / "bemovo.csv")
-    parser.add_argument("--report-output", type=Path, default=PROJECT_ROOT / "data" / "bemovo_audit.json")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--report-output", type=Path)
     parser.add_argument("--delay", type=float, default=os.getenv("REQUEST_DELAY_SECONDS", "2"))
     parser.add_argument("--save-db", action="store_true", help="Zapisz zweryfikowane obserwacje również w PostgreSQL.")
+    parser.add_argument("--availability-only", action="store_true", help="Sprawdź bieżące statusy bez pobierania i zapisywania nowych cen.")
     args = parser.parse_args(argv)
+    basename = "bemovo_availability" if args.availability_only else "bemovo"
+    args.output = args.output or PROJECT_ROOT / "data" / (basename + ".csv")
+    args.report_output = args.report_output or PROJECT_ROOT / "data" / (basename + "_audit.json")
     engine = None
     try:
-        records, report = collect_bemovo(delay=args.delay)
+        if args.availability_only:
+            records, report = collect_bemovo(delay=args.delay, availability_only=True)
+        else:
+            records, report = collect_bemovo(delay=args.delay)
         if args.save_db:
             from sqlalchemy.exc import SQLAlchemyError
-            from src.database import get_engine, init_db, upsert_listings
+            from src.database import get_engine, init_db
+            from src.availability import save_inventory_snapshot
             try:
                 engine = get_engine()
                 init_db(engine)
-                inserted = upsert_listings(engine, records)
+                inventory = report["inventory"]
+                saved = save_inventory_snapshot(
+                    engine, records, inventory["apartments"], source=inventory["source"],
+                    scope=inventory["scope"], listing_id_prefix=inventory["listing_id_prefix"],
+                    observed_at=report["observed_at"], complete=inventory["complete"],
+                    prices_complete=inventory["prices_complete"],
+                )
+                inserted = saved["new_observations"]
             except SQLAlchemyError:
                 raise BemovoError("Nie udało się zapisać danych do bazy; sprawdź lokalną konfigurację połączenia.") from None
             report["database_new_observations"] = inserted
-        _write_snapshot(records, report, args.output, args.report_output)
-        print(f"Zweryfikowane dostępne mieszkania: {len(records)}. Niezgodności cen: 0.")
+            report["database_availability_counts"] = saved["availability_counts"]
+            report["database_snapshot_replayed"] = saved["snapshot_replayed"]
+        if args.availability_only:
+            _write_availability_snapshot(report, args.output, args.report_output)
+            print(f"Sprawdzone statusy mieszkań: {len(report['inventory']['apartments'])}. Bez nowych obserwacji cen.")
+        else:
+            _write_snapshot(records, report, args.output, args.report_output)
+            print(f"Zweryfikowane dostępne mieszkania: {len(records)}. Niezgodności cen: 0.")
         print(f"CSV: {args.output}")
         print(f"Raport: {args.report_output}")
         if args.save_db:
             print(f"Nowe obserwacje w bazie: {inserted}.")
+            print(f"Dostępność mieszkań: {saved['availability_counts']}.")
         return 0
     except BemovoError as error:
         print(f"Błąd źródła: {error}")
