@@ -130,10 +130,13 @@ See [OLX_OTODOM.md](OLX_OTODOM.md) for the access findings.
 
 ## Integration status and limitations
 
-The preview is manual and local, separate from PostgreSQL ingestion, price and
-availability history, model training and daily collection. The gated production
-workflow calls the generic `src.fetch_data`, does not call `src.fetch_otodom`,
-and remains disabled.
+The original preview is manual and local. The opt-in
+`collect_otodom_search` / `parse_otodom_search_page` APIs add consecutive public
+result pages with exact requested/filter/state page checks and coverage metadata.
+The separate `src.daily_listings` runner stores price observations; its daily job
+was enabled on 2026-10-07 after verified Supabase readback. It collects a bounded
+sample and performs no model training or availability inference. The older
+generic production job remains disabled. See [DAILY_COLLECTION.md](DAILY_COLLECTION.md).
 
 Absence from one sampled search page cannot mark a listing `missing` or `sold`.
 An advertisement can move to another results page, be refreshed or be removed for

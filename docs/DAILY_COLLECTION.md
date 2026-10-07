@@ -1,6 +1,8 @@
 # Codzienne obserwacje OLX i Otodom
 
-Dodaliśmy osobne uruchomienie, które odczytuje kolejne publiczne strony sprzedaży mieszkań w Warszawie, usuwa powtórzenia w obrębie źródła i może dopisywać ceny do Supabase. Domyślnie sprawdza najwyżej **5 stron OLX i 5 stron Otodom**, z limitem **500 poprawnych rekordów na źródło**. Zapis do bazy wymaga `--save-db`. Harmonogram jest przygotowany w kodzie, ale nie został włączony w ustawieniach GitHuba.
+Dodaliśmy osobne uruchomienie, które odczytuje kolejne publiczne strony sprzedaży mieszkań w Warszawie, usuwa powtórzenia w obrębie źródła i może dopisywać ceny do Supabase. Domyślnie sprawdza najwyżej **5 stron OLX i 5 stron Otodom**, z limitem **500 poprawnych rekordów na źródło**. Zapis lokalny do bazy wymaga `--save-db`. **Harmonogram tego repozytorium został włączony 7 października 2026 na 06:15 czasu Warszawy.** Sekret `DATABASE_URL` jest skonfigurowany prywatnie w GitHubie.
+
+Przed aktywacją [ręczne uruchomienie na GitHubie](https://github.com/filip-skopczynski/real-estate-mlops/actions/runs/37640796024) zapisało **355 obserwacji: 218 z OLX i 137 z Otodom**. Odczyt z Supabase potwierdził zgodność wszystkich cen, metraży, liczby pokoi i linków. Instrukcje konfiguracji poniżej przydadzą się do własnej kopii projektu lub zmiany ustawień istniejącego wdrożenia.
 
 To szersza próbka niż wcześniejsze podglądy jednej strony. Zakres pozostaje ograniczony do mieszkań na sprzedaż w Warszawie, a nie całych portali, wynajmu czy innych miast.
 
@@ -51,6 +53,8 @@ Uzupełnij `DATABASE_URL` w swoim lokalnym `.env`, a po sprawdzeniu CSV i raport
 ```
 
 Poprawne obserwacje zapisują się w transakcji osobno dla każdego źródła. Awaria jednego źródła nie usuwa danych z drugiego. Program raportuje błąd lub częściowe pobranie i kończy się niezerowym kodem, gdy nie udało się wykonać zaplanowanych żądań; osiągnięcie ustawionego limitu jest zwykłym zakończeniem ograniczonej próbki. Raport i zachowane poprawne rekordy pokazują, co udało się odczytać.
+
+Przy zerwanym połączeniu transakcja może zostać ponowiona najwyżej trzy razy z identycznymi identyfikatorami i czasem obserwacji. Powtórzony zapis nie dopisuje tej samej obserwacji. Nowe faktyczne pobranie dostaje nowy czas. Jeśli utracono potwierdzenie już wykonanego zapisu, liczniki ponowienia opisują ostatnią potwierdzoną transakcję.
 
 Ten przepływ nie zmienia tabel dostępności, nie oznacza zniknięć jako sprzedaży i nie uruchamia treningu. Nie ma pełnego spisu aktualnych ogłoszeń, na podstawie którego można byłoby bezpiecznie wnioskować o brakujących mieszkaniach.
 

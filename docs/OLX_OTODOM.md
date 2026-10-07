@@ -124,16 +124,13 @@ Linki do ofert Otodom obecne w danych OLX nie są odwiedzane.
 
 ## 4. Połącz zapis i harmonogram
 
-Po pozytywnym sprawdzeniu adapterów podłączymy zapis do Supabase. Hasła pozostaną
-w lokalnym `.env`, a w GitHub Actions w sekrecie `DATABASE_URL`. Dane publiczne
-i limity będą konfiguracją osobną dla każdego adaptera. Nie dodajemy teraz
-fikcyjnych kluczy API ani adresów niepotwierdzonych usług.
-
-Obecny workflow uruchamia `src.fetch_data`, nie `src.fetch_olx` ani `src.fetch_otodom`, więc przed
-włączeniem trzeba zmienić go na zweryfikowane adaptery. **Na tym etapie pozostaw `PIPELINE_ENABLED`
-wyłączone.** Najpierw wykonamy ręczny przebieg i sprawdzimy dane odczytane z bazy,
-następnie uruchomimy codzienny harmonogram. Raport zapisze czas ostatniego udanego
-pobrania oraz wyniki dla każdego źródła osobno.
+Zapis do Supabase jest już podłączony przez `src.daily_listings`. Hasła są w
+lokalnym `.env` i prywatnym sekrecie GitHub Actions `DATABASE_URL`. Limity stron
+są osobne dla każdego adaptera. Nowy workflow `daily_portals.yml` został
+włączony 7 października 2026 na 06:15 czasu Warszawy po sprawdzeniu ręcznego
+pobrania, zapisu i odczytu 355 obserwacji. Raport opisuje zakres i wynik każdego
+źródła. Stare `PIPELINE_ENABLED` pozostaje wyłączone; steruje ogólnym parserem
+JSON-LD i treningiem. Szczegóły są w [DAILY_COLLECTION.md](DAILY_COLLECTION.md).
 
 [Standardowa maszyna GitHub Actions w publicznym repozytorium](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#standard-github-hosted-runners-for-public-repositories)
 i [Supabase Free](https://supabase.com/pricing) pozwalają rozpocząć bez stałych
@@ -144,6 +141,6 @@ strony nie rozstrzyga tej kwestii.
 ## Co działa już teraz
 
 Adapter Bemovo opisany w [SOURCE_BEMOVO.md](SOURCE_BEMOVO.md) obsługuje sprawdzone
-ceny i dostępność. OLX i Otodom mają osobne lokalne podglądy jednej strony,
-bez zapisu do bazy i bez treningu. Żaden z tych
-portalowych podglądów nie jest połączony z codziennym zadaniem.
+ceny i dostępność. OLX i Otodom mają osobne lokalne podglądy jednej strony oraz
+codzienny, ograniczony przepływ obserwacji z zapisem do Supabase. Pobieranie
+portalowe nie uruchamia treningu i nie rozstrzyga sprzedaży brakujących ofert.

@@ -140,11 +140,11 @@ documented in [OLX_OTODOM.md](OLX_OTODOM.md).
 
 ## Integration status
 
-The preview runs manually and locally. PostgreSQL ingestion, historical tracking,
-model training and daily scheduling are not connected to it. The existing gated
-production workflow calls `src.fetch_data`, does not call `src.fetch_olx`, and
-remains disabled. CI can test the parser offline without accessing OLX.
-
-The next step is to establish the permitted data channel and reuse scope,
-then connect validated price observations to ingestion. No model-accuracy or
-deal-quality claim follows from this sample.
+The original preview runs manually and locally. The opt-in
+`collect_olx_search` / `parse_olx_search_page` APIs add consecutive public result
+pages with strict requested-versus-returned page validation. The separate
+`src.daily_listings` runner stores price observations; its daily GitHub job was
+enabled on 2026-10-07 after verified database readback. It remains a bounded
+sample and performs no training or availability inference. The older generic
+production workflow remains disabled. See [DAILY_COLLECTION.md](DAILY_COLLECTION.md)
+for the active deployment, observed OLX result ceiling and coverage audit.

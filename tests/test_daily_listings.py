@@ -223,3 +223,18 @@ def test_repeated_connection_failure_stops_after_three_attempts(monkeypatch, eng
                                              collectors={"olx": collector("olx")})
     assert save.call_count == 3 and report["status"] == "partial"
     assert "PRIVATE" not in json.dumps(report)
+
+
+def test_cli_loads_local_limits_before_parsing_environment_defaults(monkeypatch, tmp_path):
+    def dotenv(*args, **kwargs):
+        assert kwargs["override"] is False
+        monkeypatch.setenv("OLX_MAX_PAGES", "7")
+        monkeypatch.setenv("PORTAL_MAX_LISTINGS", "80")
+    monkeypatch.setattr(daily_listings, "load_dotenv", dotenv)
+    captured = {}
+    def run(**options):
+        captured.update(options)
+        return [], {"status": "ok", "sources": {}}
+    monkeypatch.setattr(daily_listings, "run_collection", run)
+    assert daily_listings.main(["--output", str(tmp_path / "rows.csv"), "--report", str(tmp_path / "audit.json")]) == 0
+    assert captured["max_pages_olx"] == 7 and captured["max_listings"] == 80

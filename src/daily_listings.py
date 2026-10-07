@@ -16,6 +16,7 @@ import time
 
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from dotenv import load_dotenv
 
 from src import database
 from src.fetch_data import _write_csv
@@ -171,6 +172,7 @@ def _read_pages(paths, max_pages):
 
 
 def main(argv=None):
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
     parser = argparse.ArgumentParser(description="Zbierz ograniczony zakres ofert sprzedaży mieszkań w Warszawie.")
     parser.add_argument("--source", choices=["both", "olx", "otodom"], default="both")
     parser.add_argument("--max-pages-olx", type=int, default=os.environ.get("OLX_MAX_PAGES", "5"))
