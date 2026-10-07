@@ -12,9 +12,10 @@ import math
 import os
 from pathlib import Path
 import tempfile
+import time
 
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from src import database
 from src.fetch_data import _write_csv
@@ -22,6 +23,20 @@ from src.fetch_olx import MAX_HTML_BYTES, _offline_content, _timestamp
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_NAMES = {"olx": "www.olx.pl", "otodom": "www.otodom.pl"}
+
+
+def _store_batch(engine, rows):
+    """Retry lost connections with the identical idempotency keys, at most 3 times."""
+    for attempt in range(1, 4):
+        try:
+            return database.upsert_listings_report(engine, rows), attempt
+        except OperationalError as error:
+            code = getattr(error.orig, "pgcode", "") or ""
+            transient = error.connection_invalidated or code.startswith("08") or code in {"40001", "40P01", "57P01"}
+            if not transient or attempt == 3:
+                raise
+            engine.dispose()
+            time.sleep(2 ** attempt)
 
 
 def _validate_limits(max_pages_olx, max_pages_otodom, max_listings, delay):
@@ -104,7 +119,9 @@ def run_collection(*, source="both", max_pages_olx=5, max_pages_otodom=5,
             source_report["database_status"] = "not_requested"
         else:
             try:
-                source_report["database_statistics"] = database.upsert_listings_report(engine, rows)
+                statistics, attempts = _store_batch(engine, rows)
+                source_report["database_statistics"] = statistics
+                source_report["database_write_attempts"] = attempts
                 source_report["database_status"] = "saved"
             except (SQLAlchemyError, ValueError):
                 # SQLAlchemy exception text can contain credentials or SQL parameters.

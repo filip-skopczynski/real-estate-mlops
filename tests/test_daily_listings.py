@@ -190,3 +190,36 @@ def test_fictional_html_flows_through_both_real_adapters_without_network(engine)
     for source_report in report["sources"].values():
         assert source_report["request_counts"] == {"robots": 0, "html": 0}
         assert source_report["database_statistics"]["new_listings"] == 2
+
+
+def test_lost_connection_is_retried_with_identical_timestamp_without_duplicates(monkeypatch, engine):
+    actual = database.upsert_listings_report
+    calls = []
+    def save(instance, rows):
+        calls.append(rows[0]["observed_at"])
+        if len(calls) == 1:
+            # Simulate lost acknowledgement after a successful commit.
+            actual(instance, rows)
+            raise OperationalError(None, None, Exception("private connection details"), connection_invalidated=True)
+        return actual(instance, rows)
+    monkeypatch.setattr(database, "upsert_listings_report", save)
+    monkeypatch.setattr(engine, "dispose", Mock())  # Keep isolated in-memory SQLite available.
+    sleep = Mock()
+    monkeypatch.setattr(daily_listings.time, "sleep", sleep)
+    _, report = daily_listings.run_collection(source="olx", engine=engine, observed_at=AT,
+                                             collectors={"olx": collector("olx")})
+    assert report["status"] == "ok" and calls == [AT, AT]
+    assert report["sources"]["olx"]["database_write_attempts"] == 2
+    assert report["sources"]["olx"]["database_statistics"]["observations_inserted"] == 0
+    assert len(database.read_observations(engine)) == 1
+    sleep.assert_called_once_with(2)
+
+
+def test_repeated_connection_failure_stops_after_three_attempts(monkeypatch, engine):
+    save = Mock(side_effect=OperationalError(None, None, Exception("PRIVATE"), connection_invalidated=True))
+    monkeypatch.setattr(database, "upsert_listings_report", save)
+    monkeypatch.setattr(daily_listings.time, "sleep", Mock())
+    _, report = daily_listings.run_collection(source="olx", engine=engine, observed_at=AT,
+                                             collectors={"olx": collector("olx")})
+    assert save.call_count == 3 and report["status"] == "partial"
+    assert "PRIVATE" not in json.dumps(report)
