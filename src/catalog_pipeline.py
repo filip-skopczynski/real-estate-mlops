@@ -141,7 +141,7 @@ def _phase(*, name, mode, collector, engine, owner, known, max_pages,
             if audit["status"] == "partial":
                 phase["status"], error_code = "partial", "source_failed"
                 break
-            if audit["completed"] or mode == "daily" or audit.get("termination") in {"listing_budget", "duration_budget", "supported_page_limit"}:
+            if audit["completed"] or mode == "daily" or audit.get("termination") in {"listing_budget", "request_budget", "duration_budget", "supported_page_limit"}:
                 break
             if checkpoint == previous_checkpoint or (audit["pages_read"] == 0 and _requests(audit) == 0):
                 phase["status"], error_code = "partial", "source_failed"

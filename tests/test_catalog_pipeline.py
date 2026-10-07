@@ -92,6 +92,24 @@ def test_budget_pause_and_source_failure_keep_durable_resume_cursor(engine):
     assert len(database.read_observations(engine)) == 3
 
 
+def test_resumed_request_budget_pause_without_pages_is_not_a_source_failure(engine):
+    pipeline.run_collection(mode="bootstrap", source="olx", engine=engine,
+        observed_at=AT, max_pages=1, collectors={"olx": collector("olx", completed=False)})
+    initial = storage.read_progress(engine, "www.olx.pl", "bootstrap")
+    def exhausted(**options):
+        rows, audit = capture("olx", options, rows=[], pages=0, requests=2, completed=False)
+        audit.update(termination="request_budget", checkpoint=options["checkpoint"])
+        return rows, audit
+    rows, report = pipeline.run_collection(mode="bootstrap", source="olx", engine=engine,
+        observed_at=AT + timedelta(hours=1), max_requests=2, collectors={"olx": exhausted})
+    state = storage.read_progress(engine, "www.olx.pl", "bootstrap")
+    assert report["status"] == "ok" and rows == []
+    assert state["checkpoint"] == initial["checkpoint"]
+    assert state["generation"] == initial["generation"] and not state["completed"]
+    assert state["lease_owner"] is None and state["last_error"] is None
+    assert count(engine, storage.listing_catalog) == 1
+
+
 def test_completed_bootstrap_skips_fetch_and_preserves_generation(engine):
     mark_bootstrap_complete(engine)
     initial = storage.read_progress(engine, "www.olx.pl", "bootstrap")
