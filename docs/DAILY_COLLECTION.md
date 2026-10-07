@@ -53,6 +53,8 @@ Sprawdzamy robots.txt, stosujemy ograniczenia wielkości odpowiedzi i czasów oc
 
 Tabela `listing_catalog` przechowuje identyfikator i link również przy brakującej cenie, metrażu albo dokładnej liczbie pokoi, wraz z `first_seen_at` i `last_seen_at`. OLX opisuje `four` jako „4 i więcej”; dokładna liczba pozostaje wtedy pusta. Nie wpisujemy umownie czterech. Nieznane pola oraz daty publikacji pozostają puste, gdy format źródła ich nie potwierdza. Karty inwestycji i reklamowe kopie HPR nadal nie są osobnymi mieszkaniami.
 
+Otodom może umieszczać osobne mieszkania w `relatedAds` jednej karty inwestycji. Katalog rozwija jeden poziom takich grup i sprawdza każde mieszkanie tym samym walidatorem co zwykłą ofertę: własne ID i adres, sprzedaż mieszkania, Warszawa oraz własne cechy. Nie przepisuje ceny, metrażu ani lokalizacji inwestycji do jej mieszkań. Na publicznej stronie 275 z 7 października 2026 potwierdziliśmy 36 takich mieszkań; cztery widoczne linki miały ceny i metraże zgodne z odczytem. Sama karta inwestycji pozostaje pominięta. Raport rozróżnia karty nadrzędne, rozwinięte mieszkania i odrzucone rekordy.
+
 Tabela `collection_progress` zachowuje punkt wznowienia i stan ukończenia dla źródła oraz trybu. Czasowe zajęcie przeglądu przez jeden proces ogranicza równoczesny zapis postępu. Nowe tabele są dodawane bez usuwania istniejących danych; w PostgreSQL mają włączone RLS.
 
 Istniejące `listings` i `listing_observations` obejmują rekordy ze zweryfikowaną ceną całkowitą w PLN i metrażem; liczba pokoi może pozostawać pusta. Rekord z brakującymi cechami jest użyteczny w spisie, ale wymaga dalszej oceny przed wykorzystaniem w modelu. Pipeline nie uruchamia treningu ani nie wycenia mieszkań.
@@ -68,6 +70,8 @@ Nie zmieniamy tabel dostępności Bemovo. Brak oferty w wynikach portalu nie ozn
 Workflow **Warsaw OLX and Otodom catalogue** znajduje się w `.github/workflows/daily_portals.yml`. Testy uruchamiają się najpierw z odizolowanym PostgreSQL 16. Dane produkcyjne nie są bazą testową.
 
 W **Actions → Warsaw OLX and Otodom catalogue → Run workflow** wybierz `main`, tryb `bootstrap`, `daily` albo `refresh` i ustaw **save_db**. Domyślnie ręczne uruchomienie ma `daily` i wyłączony zapis, co pozwala obejrzeć CSV i raport. Pliki są dostępne jako **Artifacts** przez 14 dni. Ręczny `bootstrap` z zapisem uruchamia pobranie startowe; ponowienie może kontynuować zachowany postęp.
+
+Pole **source** pozwala ręcznie wybrać `both`, `olx` lub `otodom`, np. odświeżyć pojedynczy portal po poprawie jego parsera. Uruchomienia z harmonogramu zawsze obejmują oba źródła.
 
 | Ustawienie GitHuba | Zastosowanie |
 | --- | --- |

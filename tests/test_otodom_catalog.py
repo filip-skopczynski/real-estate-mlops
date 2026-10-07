@@ -292,3 +292,121 @@ def test_audit_no_inventory_or_training_claim_and_json_serializable():
     assert audit["training_performed"] is False and audit["availability_inference"] is False
     assert audit["detail_pages_fetched"] == 0
     json.dumps(audit, allow_nan=False)
+
+
+def grouped_page(*, children=None, parent_change=None, direct=False, number=1, total_pages=1):
+    def mutate(details):
+        base = details["data"]["searchAds"]["items"][0]
+        direct_item = deepcopy(base)
+        parent = {"id": 990900, "estate": "INVESTMENT", "transaction": "SELL",
+                  "slug": "syntetyczna-inwestycja-IDgroup", "href": "[lang]/investment/syntetyczna-inwestycja-IDgroup",
+                  "relatedAds": [deepcopy(base)] if children is None else children(base)}
+        if parent_change:
+            parent_change(parent)
+        details["data"]["searchAds"]["items"] = ([direct_item] if direct else []) + [parent]
+    return page(number, total_pages, mutate=mutate)
+
+
+def test_grouped_apartments_are_individual_records_and_never_parent_ranges():
+    rows, meta = parse(grouped_page())
+    assert len(rows)==1 and rows[0]["listing_id"]=="990101"
+    assert "990900" not in {r["listing_id"] for r in rows}
+    assert meta["grouped_parents"]==meta["grouped_children"]==1
+    assert meta["raw_top_level_items"]==meta["expanded_candidates"]==1
+    assert meta["skipped_items"]==0
+    _, audit=collect([grouped_page()])
+    assert audit["grouped_parents"]==audit["grouped_children"]==1
+    assert audit["detail_pages_fetched"]==0 and audit["completed"]
+
+
+def test_direct_and_grouped_duplicate_identity_is_deduplicated():
+    rows, meta=parse(grouped_page(direct=True))
+    assert len(rows)==1 and meta["duplicates_on_page"]==1
+    assert meta["raw_top_level_items"]==meta["expanded_candidates"]==2
+
+
+@pytest.mark.parametrize("change,reason", [
+    (lambda child:child.update(href="hpr/"+child["href"]),"investment_or_advertising_presentation"),
+    (lambda child:child.update(id=False),"invalid_listing_identity"),
+    (lambda child:child.update(estate="HOUSE"),"not_individual_apartment_sale"),
+    (lambda child:child.update(transaction="RENT"),"not_individual_apartment_sale"),
+    (lambda child:child.update(location={}),"unconfirmed_warsaw_location"),
+    (lambda child:child.update(slug="invalid"),"invalid_listing_url"),
+])
+def test_each_grouped_child_is_independently_validated(change,reason):
+    def children(base):
+        invalid=deepcopy(base);change(invalid)
+        return [deepcopy(base),invalid]
+    rows,meta=parse(grouped_page(children=children))
+    assert len(rows)==1 and meta["grouped_children"]==2
+    assert meta["skipped_by_reason"]=={reason:1}
+
+
+def test_sparse_child_survives_without_price_area_or_exact_rooms():
+    def children(base):
+        base.update(hidePrice=True,areaInSquareMeters=None,roomsNumber="UNKNOWN")
+        return [base]
+    rows,meta=parse(grouped_page(children=children))
+    assert len(rows)==1
+    assert all(rows[0][field] is None for field in ("price_pln","area_m2","rooms","published_at"))
+    assert meta["sparse_price_count"]==meta["sparse_area_count"]==meta["sparse_rooms_count"]==1
+
+
+@pytest.mark.parametrize("related",[{"unexpected":[]},"not-a-list",False,9])
+def test_malformed_group_children_is_reported_without_losing_valid_direct_rows(related):
+    rows,meta=parse(grouped_page(direct=True,parent_change=lambda parent:parent.update(relatedAds=related)))
+    assert len(rows)==1 and meta["skipped_by_reason"]=={"malformed_grouped_children":1}
+
+
+@pytest.mark.parametrize("change",[
+    lambda parent:parent.update(id=False),
+    lambda parent:parent.update(slug="invalid"),
+    lambda parent:parent.update(href="hpr/[lang]/investment/syntetyczna-inwestycja-IDgroup"),
+])
+def test_invalid_group_parent_does_not_authorize_expansion(change):
+    rows,meta=parse(grouped_page(parent_change=change))
+    assert rows==[] and meta["skipped_by_reason"]=={"invalid_grouped_parent":1}
+
+
+def test_nested_investment_children_are_not_recursively_expanded():
+    def children(base):
+        return [{"estate":"INVESTMENT","transaction":"SELL","relatedAds":[base]}]
+    rows,meta=parse(grouped_page(children=children))
+    assert rows==[] and meta["grouped_children"]==1
+    assert meta["skipped_by_reason"]=={"not_individual_apartment_sale":1}
+
+
+def test_malformed_child_does_not_discard_other_children():
+    rows,meta=parse(grouped_page(children=lambda base:[base,None,False,[]]))
+    assert len(rows)==1 and meta["grouped_children"]==4
+    assert meta["skipped_by_reason"]=={"not_individual_apartment_sale":3}
+
+
+def test_grouped_cardinality_bound_fails_page_and_keeps_resume_cursor():
+    html=grouped_page(children=lambda base:[deepcopy(base) for _ in range(catalog.MAX_GROUPED_CHILDREN+1)])
+    with pytest.raises(ValueError): parse(html)
+    rows,audit=collect([html])
+    assert rows==[] and audit["status"]=="partial" and audit["checkpoint"]["next_page"]==1
+
+
+def test_grouped_and_direct_conflicting_identity_fails_whole_page():
+    def children(base):
+        base["totalPrice"]["value"]+=1
+        return [base]
+    with pytest.raises(ValueError):parse(grouped_page(direct=True,children=children))
+
+
+def test_two_grouped_source_ids_cannot_share_one_url():
+    def children(base):
+        other=deepcopy(base);other["id"]+=1
+        return [base,other]
+    with pytest.raises(ValueError):parse(grouped_page(children=children))
+
+
+def test_cross_page_grouped_duplicate_is_deduped_after_discovery():
+    def changed(base):
+        base["totalPrice"]["value"]+=1
+        return [base]
+    rows,audit=collect([grouped_page(total_pages=2),grouped_page(number=2,total_pages=2,children=changed)])
+    assert len(rows)==1 and audit["duplicate_encounters"]==1
+    assert audit["grouped_children"]==2 and audit["completed"]

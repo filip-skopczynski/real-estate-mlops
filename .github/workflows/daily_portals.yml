@@ -12,6 +12,15 @@ on:
           - daily
           - bootstrap
           - refresh
+      source:
+        description: Portals to collect (scheduled runs always use both)
+        type: choice
+        required: true
+        default: both
+        options:
+          - both
+          - olx
+          - otodom
       save_db:
         description: Save catalogue, price observations and traversal progress
         type: boolean
@@ -72,6 +81,7 @@ jobs:
       SAVE_TO_DB: ${{ github.event_name == 'schedule' || inputs.save_db }}
       DATABASE_URL: ${{ (github.event_name == 'schedule' || inputs.save_db) && secrets.DATABASE_URL || '' }}
       CATALOG_MODE: ${{ inputs.mode || 'daily' }}
+      CATALOG_SOURCE: ${{ inputs.source || 'both' }}
       CATALOG_MAX_PAGES: ${{ vars.CATALOG_MAX_PAGES || '1000' }}
       CATALOG_MAX_LISTINGS: ${{ vars.CATALOG_MAX_LISTINGS || '50000' }}
       CATALOG_MAX_REQUESTS: ${{ vars.CATALOG_MAX_REQUESTS || '700' }}
@@ -100,9 +110,11 @@ jobs:
           from datetime import datetime
           from zoneinfo import ZoneInfo
           mode = os.environ['CATALOG_MODE']
+          source = os.environ['CATALOG_SOURCE']
           if os.environ['GITHUB_EVENT_NAME'] == 'schedule':
               mode = 'refresh' if datetime.now(ZoneInfo('Europe/Warsaw')).weekday() == 6 else 'daily'
-          command = [sys.executable, '-m', 'src.catalog_pipeline', '--mode', mode]
+              source = 'both'
+          command = [sys.executable, '-m', 'src.catalog_pipeline', '--mode', mode, '--source', source]
           if os.environ['SAVE_TO_DB'] == 'true':
               command.append('--save-db')
           raise SystemExit(subprocess.call(command))

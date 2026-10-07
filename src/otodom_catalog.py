@@ -28,6 +28,7 @@ SCOPE_URL = transport.DEFAULT_URL + "?by=LATEST&direction=DESC"
 # FIVE was confirmed against two visible "5 pokoi" cards in the public
 # newest-search HTML on 2026-10-07. The ordinary 1-4 room preview stays stable.
 CATALOG_ROOMS = parser.ROOMS | {"FIVE": 5}
+MAX_GROUPED_CHILDREN = 500
 
 
 def _positive(value):
@@ -104,8 +105,41 @@ def parse_otodom_catalog_page(html, page_url, observed_at=None, *, expected_page
     if metadata["sorting"] != {"by": "LATEST", "direction": "DESC"}:
         raise ValueError("Otodom catalogue must confirm requested newest sorting")
     rows, urls, skipped = {}, {}, {}
+    expanded = []
+    grouped_parents = grouped_children = 0
+    for item in items:
+        is_group = isinstance(item, dict) and item.get("estate") == "INVESTMENT" and item.get("transaction") == "SELL"
+        if not is_group:
+            expanded.append(item)
+            continue
+        related = item.get("relatedAds")
+        if related is None:
+            # Preserve the existing exclusion of an investment presentation
+            # that does not expose separate apartment identities.
+            expanded.append(item)
+            continue
+        grouped_parents += 1
+        identifier, slug = item.get("id"), item.get("slug")
+        valid_parent = (
+            type(identifier) is int and identifier > 0 and isinstance(slug, str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*-ID[A-Za-z0-9]+", slug)
+            and item.get("href") == "[lang]/investment/" + slug
+        )
+        if not valid_parent:
+            skipped["invalid_grouped_parent"] = skipped.get("invalid_grouped_parent", 0) + 1
+            continue
+        if not isinstance(related, list):
+            skipped["malformed_grouped_children"] = skipped.get("malformed_grouped_children", 0) + 1
+            continue
+        grouped_children += len(related)
+        if grouped_children > MAX_GROUPED_CHILDREN:
+            raise ValueError("Otodom grouped apartment cardinality exceeds the page safety bound")
+        # Exactly one source-provided level. Each child must independently pass
+        # the normal apartment identity, Warsaw and sale validator below. Never
+        # turn the parent or its aggregate ranges into an apartment record.
+        expanded.extend(related)
     duplicates = 0
-    for ad in items:
+    for ad in expanded:
         try:
             row = _record(ad, moment)
         except (ValueError, TypeError) as error:
@@ -122,6 +156,8 @@ def parse_otodom_catalog_page(html, page_url, observed_at=None, *, expected_page
     metadata.update(
         parsed_listings=len(rows), skipped_items=sum(skipped.values()),
         skipped_by_reason=skipped, duplicates_on_page=duplicates,
+        raw_top_level_items=len(items), expanded_candidates=len(expanded),
+        grouped_parents=grouped_parents, grouped_children=grouped_children,
         sparse_price_count=sum(row["price_pln"] is None for row in rows.values()),
         sparse_area_count=sum(row["area_m2"] is None for row in rows.values()),
         sparse_rooms_count=sum(row["rooms"] is None for row in rows.values()),
@@ -326,6 +362,10 @@ def collect_otodom_catalog(*, mode="bootstrap", max_pages=1000, max_listings=500
         "changed_duplicates": changed_duplicates,
         "duplicate_resolution": "last validated encounter by source listing ID; same URL with different source IDs remains fatal",
         "skipped_items": sum(details["skipped_items"] for details in metadata),
+        "grouped_parents": sum(details["grouped_parents"] for details in metadata),
+        "grouped_children": sum(details["grouped_children"] for details in metadata),
+        "raw_top_level_items": sum(details["raw_top_level_items"] for details in metadata),
+        "expanded_candidates": sum(details["expanded_candidates"] for details in metadata),
         "sparse_price_count": sum(row["price_pln"] is None for row in rows.values()),
         "sparse_area_count": sum(row["area_m2"] is None for row in rows.values()),
         "sparse_rooms_count": sum(row["rooms"] is None for row in rows.values()),

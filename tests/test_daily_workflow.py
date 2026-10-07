@@ -26,6 +26,8 @@ def test_schedule_is_warsaw_daily_and_source_writes_are_separate_from_training()
     assert value["on"]["schedule"] == [{"cron": "15 6 * * *", "timezone": "Europe/Warsaw"}]
     assert value["on"]["workflow_dispatch"]["inputs"]["save_db"]["default"] == "false"
     assert value["on"]["workflow_dispatch"]["inputs"]["mode"]["default"] == "daily"
+    assert value["on"]["workflow_dispatch"]["inputs"]["source"]["default"] == "both"
+    assert value["on"]["workflow_dispatch"]["inputs"]["source"]["options"] == ["both", "olx", "otodom"]
     assert "PORTAL_COLLECTION_ENABLED == 'true'" in value["jobs"]["collect"]["if"]
     body = json.dumps(value)
     assert "src.train" not in body and "src.fetch_data" not in body
@@ -38,7 +40,8 @@ def test_schedule_is_warsaw_daily_and_source_writes_are_separate_from_training()
     ("workflow_dispatch", "bootstrap", "2026-10-11T04:15:00", "true", "bootstrap"),
     ("workflow_dispatch", "daily", "2026-10-11T04:15:00", "false", "daily"),
 ])
-def test_actual_launch_script_selects_warsaw_mode_and_explicit_writes(monkeypatch, event, manual_mode, date, save, expected):
+@pytest.mark.parametrize("selection", ["both", "otodom"])
+def test_actual_launch_script_selects_warsaw_mode_and_explicit_writes(monkeypatch, event, manual_mode, date, save, expected, selection):
     class Clock(datetime):
         @classmethod
         def now(cls, tz):
@@ -48,13 +51,15 @@ def test_actual_launch_script_selects_warsaw_mode_and_explicit_writes(monkeypatc
     calls = []
     monkeypatch.setenv("GITHUB_EVENT_NAME", event)
     monkeypatch.setenv("CATALOG_MODE", manual_mode)
+    monkeypatch.setenv("CATALOG_SOURCE", selection)
     monkeypatch.setenv("SAVE_TO_DB", save)
     monkeypatch.setattr(subprocess, "call", lambda command: calls.append(command) or 0)
     monkeypatch.setattr(datetime_module, "datetime", Clock)
     with pytest.raises(SystemExit) as outcome:
         exec(compile(script("Collect Warsaw catalogue and update observations"), "workflow-launch", "exec"), {})
     assert outcome.value.code == 0
-    assert calls == [[sys.executable, "-m", "src.catalog_pipeline", "--mode", expected] + (["--save-db"] if save == "true" else [])]
+    selected = "both" if event == "schedule" else selection
+    assert calls == [[sys.executable, "-m", "src.catalog_pipeline", "--mode", expected, "--source", selected] + (["--save-db"] if save == "true" else [])]
 
 
 @pytest.mark.parametrize("save,secret,raises", [("true", "", True), ("true", "private-url", False), ("false", "", False)])
