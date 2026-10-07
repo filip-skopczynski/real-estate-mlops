@@ -1,98 +1,95 @@
-# Codzienne obserwacje OLX i Otodom
+# Spis Warszawy, codzienne odkrywanie i odświeżanie cen
 
-Dodaliśmy osobne uruchomienie, które odczytuje kolejne publiczne strony sprzedaży mieszkań w Warszawie, usuwa powtórzenia w obrębie źródła i może dopisywać ceny do Supabase. Domyślnie sprawdza najwyżej **5 stron OLX i 5 stron Otodom**, z limitem **500 poprawnych rekordów na źródło**. Zapis lokalny do bazy wymaga `--save-db`. **Harmonogram tego repozytorium został włączony 7 października 2026 na 06:15 czasu Warszawy.** Sekret `DATABASE_URL` jest skonfigurowany prywatnie w GitHubie.
+Zbieramy publiczne ogłoszenia **sprzedaży mieszkań w Warszawie** z OLX i Otodom. Pierwsze uruchomienie buduje możliwie szeroki spis. Następne codzienne uruchomienia odkrywają ogłoszenia i stopniowo sprawdzają dalsze wyniki. Okresowy szerszy przegląd odświeża także ceny starszych ofert. Postęp zapisujemy w PostgreSQL, aby przerwany przegląd mógł zostać wznowiony w następnym przebiegu.
 
-Przed aktywacją [ręczne uruchomienie na GitHubie](https://github.com/filip-skopczynski/real-estate-mlops/actions/runs/37640796024) zapisało **355 obserwacji: 218 z OLX i 137 z Otodom**. Odczyt z Supabase potwierdził zgodność wszystkich cen, metraży, liczby pokoi i linków. Instrukcje konfiguracji poniżej przydadzą się do własnej kopii projektu lub zmiany ustawień istniejącego wdrożenia.
+Poprzedni, ograniczony przepływ z pięcioma stronami każdego portalu został włączony **7 października 2026 o 06:15 czasu Warszawy**. Przed aktywacją [ręczne uruchomienie na GitHubie](https://github.com/filip-skopczynski/real-estate-mlops/actions/runs/37640796024) zapisało **355 obserwacji: 218 z OLX i 137 z Otodom**. Odczyt z Supabase potwierdził zgodność cen, metraży, pokoi i linków. Ten wynik opisuje wcześniejszą próbkę; nie jest wynikiem pełnego pobrania startowego.
 
-To szersza próbka niż wcześniejsze podglądy jednej strony. Zakres pozostaje ograniczony do mieszkań na sprzedaż w Warszawie, a nie całych portali, wynajmu czy innych miast.
+## Dlaczego pięć stron nie wystarczało
 
-## 1. Sprawdź lokalny wynik
+Stare `src.daily_listings` codziennie zaczyna od stron 1–5. Nie przechodzi następnego dnia automatycznie do 6–10. Dalsze ogłoszenia mogły więc nigdy nie trafić do bazy, a ich ceny nie były odświeżane. To polecenie pozostaje przydatne jako ograniczony test dawnego przepływu.
 
-Uruchom z katalogu głównego projektu, w terminalu VS Code:
+Nowe polecenie `src.catalog_pipeline` rozdziela trzy tryby:
 
-```powershell
-.\.venv\Scripts\python.exe -m src.daily_listings
-```
-
-To zapisze `data/daily_listings.csv` oraz `data/daily_collection_audit.json`. Pierwszy plik zawiera odczytane ceny i cechy; drugi opisuje pobranie każdego źródła, zakres i powód zakończenia. Ten tryb nie łączy się z bazą. Dane i raporty są ignorowane przez Git.
-
-Limity możesz podać wprost:
-
-```powershell
-.\.venv\Scripts\python.exe -m src.daily_listings --max-pages-olx 5 --max-pages-otodom 5 --max-listings 500 --delay 2
-```
-
-Program zachowuje co najmniej dwie sekundy przerwy między żądaniami. Sprawdza robots.txt i kończy pobieranie danego źródła na blokadzie 403/429, stronie weryfikacji lub niezgodnej strukturze. Nie korzysta z logowania, proxy, wewnętrznych API ani stron szczegółów ofert.
-
-Możesz też sprawdzić obydwa źródła bez internetu na fikcyjnych ofertach:
-
-```powershell
-.\.venv\Scripts\python.exe -m src.daily_listings --offline-olx tests/fixtures/olx_search.html --offline-otodom tests/fixtures/otodom_search.html --max-pages-olx 1 --max-pages-otodom 1
-```
-
-Wcześniejsze polecenia `src.fetch_olx` i `src.fetch_otodom` nadal oznaczają osobny podgląd jednej strony. Przechodzenie po kolejnych stronach jest dostępne w nowym uruchomieniu `src.daily_listings`.
-
-## 2. Zrozum, co znaczy „nowa oferta”
-
-W tym projekcie **nowa oferta oznacza identyfikator, który pierwszy raz zapisujemy w naszej bazie**. Stara oferta, którą pierwszy raz znajdziemy dziś, też jest dla nas nowa. Data obserwacji jest czasem pobrania; nie zastępuje daty publikacji. Odświeżenie lub płatne promowanie ogłoszenia nie tworzy nowego identyfikatora.
-
-| Licznik zapisu | Znaczenie |
+| Tryb | Zastosowanie |
 | --- | --- |
-| `new_listings` | Pierwszy zapis pary źródło + identyfikator |
-| `existing_listings` | Oferta była już w naszej bazie |
-| `observations_inserted` | Dopisane obserwacje cen, także dla znanych ofert z niezmienioną ceną |
+| `bootstrap` | Pobranie startowe; szerokie przejście dostępnych wyników z możliwością wznowienia |
+| `daily` | Odkrywanie nowych identyfikatorów oraz sprawdzanie dalszych wyników |
+| `refresh` | Szerszy przegląd znanych i nieznanych ogłoszeń, obejmujący również starsze ceny |
 
-Tabela `listings` przechowuje ostatnią znaną cenę oraz `first_seen_at` i `last_seen_at`. `listing_observations` zachowuje historię. Jedna nieruchomość wystawiona na obu portalach może nadal mieć dwa różne rekordy; rozpoznawanie takich duplikatów nie jest jeszcze zaimplementowane.
+Przy zapisie do bazy brak postępu źródła powoduje rozpoczęcie pobrania startowego. Gdy rozpoczęty `bootstrap` pozostaje nieukończony, `daily` najpierw sprawdza najnowsze wyniki, a następnie wznawia dalszy spis. Po ukończeniu spisu codzienne zadanie sprawdza do 30 początkowych stron i do 30 stron rotującego przeglądu dalszych wyników, z budżetem do 60 żądań na każdą fazę. Szerszy `refresh` wykorzystuje pełny skonfigurowany budżet. Zapisany punkt wznowienia jest częścią stanu konkretnego źródła i trybu.
 
-## 3. Dopiero potem zapisz do Supabase
+Osiągnięcie budżetu nie oznacza zakończenia spisu. Raport rozróżnia koniec zaplanowanego przejścia od przerwania przez limit albo błąd. Ukończony szeroki przegląd może rozpocząć nowy cykl; nieukończony kontynuuje zachowany postęp.
 
-Uzupełnij `DATABASE_URL` w swoim lokalnym `.env`, a po sprawdzeniu CSV i raportu uruchom:
+## Uruchomienie lokalne
+
+W katalogu głównym projektu, w terminalu VS Code:
 
 ```powershell
-.\.venv\Scripts\python.exe -m src.daily_listings --save-db
+# Zapisz lokalny CSV i raport; bez połączenia z Supabase:
+.\.venv\Scripts\python.exe -m src.catalog_pipeline --mode bootstrap
+# Po skonfigurowaniu własnego .env zapisz spis, ceny i postęp:
+.\.venv\Scripts\python.exe -m src.catalog_pipeline --mode bootstrap --save-db
+# Codzienne odkrywanie oraz okresowy szerszy przegląd:
+.\.venv\Scripts\python.exe -m src.catalog_pipeline --mode daily --save-db
+.\.venv\Scripts\python.exe -m src.catalog_pipeline --mode refresh --save-db
 ```
 
-Poprawne obserwacje zapisują się w transakcji osobno dla każdego źródła. Awaria jednego źródła nie usuwa danych z drugiego. Program raportuje błąd lub częściowe pobranie i kończy się niezerowym kodem, gdy nie udało się wykonać zaplanowanych żądań; osiągnięcie ustawionego limitu jest zwykłym zakończeniem ograniczonej próbki. Raport i zachowane poprawne rekordy pokazują, co udało się odczytać.
+Wyniki zapisują się w ignorowanych przez Git plikach `data/catalog.csv` i `data/catalog_audit.json`. Parametry `--output` i `--report` pozwalają wybrać inne pliki. `--source olx` albo `--source otodom` uruchamia pojedyncze źródło; domyślne `both` obejmuje obydwa.
 
-Przy zerwanym połączeniu transakcja może zostać ponowiona najwyżej trzy razy z identycznymi identyfikatorami i czasem obserwacji. Powtórzony zapis nie dopisuje tej samej obserwacji. Nowe faktyczne pobranie dostaje nowy czas. Jeśli utracono potwierdzenie już wykonanego zapisu, liczniki ponowienia opisują ostatnią potwierdzoną transakcję.
+Bez `--save-db` program nie zapisuje trwałego punktu wznowienia. Jest to lokalna próba, której zakres zależy od ustawionego budżetu. Zapis do Supabase wymaga `DATABASE_URL` w prywatnym `.env` lub zmiennej środowiska. Nie wpisuj pełnego adresu z hasłem do kodu, dokumentacji ani zwykłych Variables na GitHubie.
 
-Ten przepływ nie zmienia tabel dostępności, nie oznacza zniknięć jako sprzedaży i nie uruchamia treningu. Nie ma pełnego spisu aktualnych ogłoszeń, na podstawie którego można byłoby bezpiecznie wnioskować o brakujących mieszkaniach.
+Domyślne limity na pojedyncze źródło:
 
-## 4. Sprawdź ręczne uruchomienie na GitHubie
-
-Po umieszczeniu nowego kodu na gałęzi `main` otwórz repozytorium → **Actions → Daily OLX and Otodom observations → Run workflow**. Wybierz `main` i pozostaw **save_db** wyłączone. Nie potrzebujesz wtedy sekretu bazy.
-
-GitHub najpierw uruchomi testy z odizolowaną bazą PostgreSQL 16, a następnie pobierze ograniczoną próbkę. Zakończony przebieg udostępni CSV i raport w sekcji **Artifacts** przez 14 dni. Komputer może być wyłączony; zadanie wykonuje maszyna GitHuba. Pliki z ofertami nie są dopisywane do repozytorium.
-
-## 5. Dodaj połączenie z bazą jako sekret
-
-W repozytorium wybierz **Settings → Secrets and variables → Actions → Secrets → New repository secret**. Nazwa: `DATABASE_URL`. Wartość: Twój pełny adres Supabase Session pooler z hasłem i `sslmode=require`, wklejony prywatnie w GitHubie. Nie wpisuj go do kodu, README ani zwykłych Variables.
-
-Teraz wykonaj jeszcze jedno ręczne uruchomienie z zaznaczonym **save_db** i sprawdź liczniki w raporcie oraz dane w Supabase. Zapis ręczny działa także przy wyłączonym harmonogramie.
-
-## 6. Włącz raz dziennie
-
-Po sprawdzeniu pobierania, zapisu i warunków korzystania ze źródeł otwórz **Settings → Secrets and variables → Actions → Variables → New repository variable**. Dodaj `PORTAL_COLLECTION_ENABLED` o wartości `true`.
-
-| Zmienna GitHuba | Wartość domyślna | Co ogranicza |
+| Ustawienie | Wartość | Znaczenie |
 | --- | --- | --- |
-| `OLX_MAX_PAGES` | `5` | Liczbę publicznych stron OLX |
-| `OTODOM_MAX_PAGES` | `5` | Liczbę publicznych stron Otodom |
-| `PORTAL_MAX_LISTINGS` | `500` | Rekordy na pojedyncze źródło |
-| `REQUEST_DELAY_SECONDS` | `2` | Minimalną przerwę w sekundach |
+| `CATALOG_MAX_PAGES` / `--max-pages` | `1000` | Maksymalna liczba stron przechodzenia |
+| `CATALOG_MAX_LISTINGS` / `--max-listings` | `50000` | Maksymalna liczba rozpoznanych ogłoszeń |
+| `CATALOG_MAX_REQUESTS` / `--max-requests` | `700` | Budżet żądań sieciowych |
+| `REQUEST_DELAY_SECONDS` / `--delay` | `2` | Minimalna przerwa w sekundach |
 
-Nowy workflow jest ustawiony na **06:15 czasu Warszawy**, z `timezone: Europe/Warsaw`, i zapisuje obserwacje do bazy. GitHub obsługuje strefy IANA oraz zmianę czasu letniego. Harmonogram działa z gałęzi domyślnej; dodatkowo ten projekt wymaga `main`. [Dokumentacja składni GitHub Actions](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onschedule)
+Sprawdzamy robots.txt, stosujemy ograniczenia wielkości odpowiedzi i czasów oczekiwania. Blokada 403/429, strona weryfikacji albo niezgodna struktura zatrzymują dane źródło. Nie korzystamy z kont, proxy, wewnętrznych API ani stron szczegółów ogłoszeń. Stan w bazie ogranicza nakładanie się pobrań, a workflow dodatkowo dopuszcza tylko jedno zbieranie portalowe naraz.
 
-Godzina jest planowanym wyzwoleniem, a nie gwarancją ukończenia o 06:15. GitHub może opóźnić lub pominąć uruchomienie, a publiczny harmonogram wyłącza po 60 dniach bez aktywności w repozytorium. Sprawdzaj historię Actions. Wyłączenie zmiennej `PORTAL_COLLECTION_ENABLED` zatrzymuje kolejne pobrania z harmonogramu. [Zdarzenie schedule w GitHub Actions](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
+## Co zapisujemy
 
-Pozostaw stare `PIPELINE_ENABLED` wyłączone: steruje innym zadaniem, z ogólnym parserem JSON-LD i treningiem. Nowy workflow portalowy nie korzysta z `LISTINGS_URL`, `MAX_PAGES` ani `MAX_LISTINGS` tego starego zadania.
+Tabela `listing_catalog` przechowuje identyfikator i link również przy brakującej cenie, metrażu albo dokładnej liczbie pokoi, wraz z `first_seen_at` i `last_seen_at`. OLX opisuje `four` jako „4 i więcej”; dokładna liczba pozostaje wtedy pusta. Nie wpisujemy umownie czterech. Nieznane pola oraz daty publikacji pozostają puste, gdy format źródła ich nie potwierdza. Karty inwestycji i reklamowe kopie HPR nadal nie są osobnymi mieszkaniami.
 
-## Dlaczego to nie oznacza całego serwisu
+Tabela `collection_progress` zachowuje punkt wznowienia i stan ukończenia dla źródła oraz trybu. Czasowe zajęcie przeglądu przez jeden proces ogranicza równoczesny zapis postępu. Nowe tabele są dodawane bez usuwania istniejących danych; w PostgreSQL mają włączone RLS.
 
-W zapisanym sprawdzeniu z 7 października 2026 OLX podał 4437 wyników widocznych, ale tylko 1000 pozycji i 25 stron dostępnych w metadanych wyszukiwania. Otodom podał 20 252 wyniki i 563 strony. Liczby zależą od chwili i filtrów. Domyślnych pięć stron jest ograniczoną próbką, a nie pełnym zbiorem Warszawy. Samo zwiększenie limitu nie usuwa pułapu wyszukiwania OLX.
+Istniejące `listings` i `listing_observations` obejmują rekordy ze zweryfikowaną ceną całkowitą w PLN i metrażem; liczba pokoi może pozostawać pusta. Rekord z brakującymi cechami jest użyteczny w spisie, ale wymaga dalszej oceny przed wykorzystaniem w modelu. Pipeline nie uruchamia treningu ani nie wycenia mieszkań.
 
-Nie potwierdziliśmy sortowania według najnowszej publikacji: Otodom wskazuje `DEFAULT/DESC`, a wyniki zawierają także stare odświeżone ogłoszenia. Promowanie i nowe wpisy przesuwają strony podczas pobierania. Dlatego program sprawdza kolejne skonfigurowane strony i usuwa powtórzenia; nie przerywa po pierwszym znanym identyfikatorze. Nadal może coś przeoczyć.
+**„Nowa oferta” oznacza identyfikator po raz pierwszy zapisany w naszej bazie.** Ogłoszenie opublikowane miesiąc temu może dziś zostać przez nas odkryte. To nie dowód nowej publikacji ani nowego mieszkania na rynku. Zmiana ceny znanego ID tworzy obserwację i zachowuje historię. Czas obserwacji jest rzeczywistym czasem pobrania, a data publikacji stanowi osobne pole. Jedno mieszkanie zamieszczone na obu portalach może mieć dwa ID; łączenie takich nieruchomości wymaga osobnego etapu.
 
-Parser OLX pomija „4 i więcej pokoi”, ponieważ nie znamy dokładnej liczby. Otodom obsługuje zweryfikowane 1–4 pokoje, a nieznane wartości, inwestycje, ukryte ceny i reklamowe kopie HPR pomija. Próbka obejmuje wyłącznie rekordy zgodne z kontraktem parserów. Raport nie może być traktowany jako dowód pełnego pokrycia rynku ani sprzedaży brakujących ofert.
+Cena z wcześniejszego pobrania zachowuje swój wcześniejszy czas. Dzisiejsze odkrywanie nowych ofert nie oznacza, że sprawdziliśmy dziś cenę każdego starego ogłoszenia. Szerszy `refresh` aktualizuje tę część danych, którą rzeczywiście ponownie odczyta.
 
-Dostępność publicznego HTML i robots.txt nie ustalają uprawnień do dowolnego ponownego wykorzystania danych. Warunki automatycznej zbiórki i treningu nadal wymagają ustalenia; Otodom publikuje `ai-input=no, ai-train=no`. Nowy workflow zbiera obserwacje i nie uruchamia modelu. Szczegóły opisują [OLX](SOURCE_OLX.md), [Otodom](SOURCE_OTODOM.md) oraz [ustalenia dostępu](OLX_OTODOM.md).
+Nie zmieniamy tabel dostępności Bemovo. Brak oferty w wynikach portalu nie oznacza sprzedaży ani wycofania; przesunięcia stron, limity i zakończenie budżetu mogą powodować pominięcia.
+
+## GitHub Actions
+
+Workflow **Warsaw OLX and Otodom catalogue** znajduje się w `.github/workflows/daily_portals.yml`. Testy uruchamiają się najpierw z odizolowanym PostgreSQL 16. Dane produkcyjne nie są bazą testową.
+
+W **Actions → Warsaw OLX and Otodom catalogue → Run workflow** wybierz `main`, tryb `bootstrap`, `daily` albo `refresh` i ustaw **save_db**. Domyślnie ręczne uruchomienie ma `daily` i wyłączony zapis, co pozwala obejrzeć CSV i raport. Pliki są dostępne jako **Artifacts** przez 14 dni. Ręczny `bootstrap` z zapisem uruchamia pobranie startowe; ponowienie może kontynuować zachowany postęp.
+
+| Ustawienie GitHuba | Zastosowanie |
+| --- | --- |
+| Secret `DATABASE_URL` | Prywatne połączenie Supabase Session pooler z SSL |
+| Variable `PORTAL_COLLECTION_ENABLED=true` | Włącza planowane pobrania z zapisem do bazy |
+| Variables `CATALOG_MAX_PAGES`, `CATALOG_MAX_LISTINGS`, `CATALOG_MAX_REQUESTS` | Zastępują domyślne budżety w tabeli powyżej |
+| Variable `REQUEST_DELAY_SECONDS` | Zwiększa przerwę między żądaniami |
+
+Harmonogram wyzwala zadanie około **06:15 czasu Warszawy**, także gdy Twój komputer jest wyłączony. W niedzielę wybieramy `refresh`, a w pozostałe dni `daily`; dzień określamy w strefie `Europe/Warsaw`. GitHub obsługuje strefę IANA i zmianę czasu letniego. Workflow korzysta z gałęzi `main`. [Składnia harmonogramu GitHub Actions](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onschedule)
+
+To planowana godzina startu. GitHub może opóźnić lub pominąć przebieg, a publiczne harmonogramy wyłącza po 60 dniach bez aktywności w repozytorium. Sprawdzaj raport i historię Actions. `PORTAL_COLLECTION_ENABLED=false` zatrzymuje kolejne planowane pobrania. [Ograniczenia schedule](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
+
+Stare `PIPELINE_ENABLED` pozostaw wyłączone: obsługuje ogólny parser JSON-LD i trening. Zmienne `OLX_MAX_PAGES`, `OTODOM_MAX_PAGES` oraz `PORTAL_MAX_LISTINGS` dotyczą dawnego `src.daily_listings`; nowy harmonogram korzysta z `CATALOG_*`.
+
+## Jak oceniać pokrycie
+
+W sprawdzeniu z 7 października 2026 OLX podał 4437 wyników widocznych, ale tylko 1000 pozycji i 25 stron udostępnionych przez wyszukiwanie. Otodom podał 20 252 wyniki i 563 strony. To liczby z jednej chwili i określonych filtrów; zmieniają się wraz z ofertami.
+
+Spis przechodzi wyniki mieszczące się w budżecie i raportuje ograniczenia źródła. OLX w `bootstrap` i `refresh` dzieli wyszukiwania przekraczające pułap na mniejsze zakresy cen. Filtry `search[filter_float_price:from]` i `search[filter_float_price:to]` zostały sprawdzone na publicznych wynikach; próbny przedział 900 000–1 000 000 PLN zmniejszył wyszukiwanie z pułapem do 443 wyników i 12 stron. Kolejne podziały zachowują nakładanie granic, a identyfikatory usuwają powtórzenia. Górny otwarty zakres może być rozszerzany. Nierozwiązane przedziały, w tym zbyt wiele ofert o tej samej cenie, trafiają do raportu; ceny ułamkowe nie są zaokrąglane do rozłącznych luk.
+
+Podział cenowy nie gwarantuje dotarcia do każdej oferty bez ceny. Zmiany kolejności podczas pobierania również mogą powodować pominięcia. Raport nie obiecuje stuprocentowego pokrycia Warszawy, nawet gdy kolejka zaplanowanych stron została ukończona.
+
+Weryfikacja z 7 października 2026 potwierdziła publiczne sortowania: OLX `search[order]=created_at:desc`, Otodom `by=LATEST&direction=DESC`, odpowiadające zastosowanym parametrom strony i widocznemu wyborowi najnowszych wyników. Każda strona musi potwierdzać oczekiwany kontekst. To nadal nie daje gwarancji wykrycia wszystkich nowych publikacji. `daily` odczytuje cały skonfigurowany początkowy zakres; nie kończy po spotkaniu pierwszego znanego ID. Promowanie, odświeżanie i przesuwanie ofert wymagają okresowego szerszego przeglądu. Otodomowe `dateCreated` i `pushedUpAt` nie stanowią zweryfikowanej daty publikacji; `published_at` pozostaje dla nich puste.
+
+Dostępność publicznego HTML i robots.txt nie ustalają uprawnień do dowolnego ponownego wykorzystania danych. Otodom publikuje `search=yes, ai-input=no, ai-train=no`. Warunki wykorzystania danych do modelu pozostają do ustalenia. Szczegóły opisują [OLX](SOURCE_OLX.md), [Otodom](SOURCE_OTODOM.md) i [ustalenia dostępu](OLX_OTODOM.md).

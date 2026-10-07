@@ -122,7 +122,7 @@ def get_engine(database_url: str | None = None) -> Engine:
 def init_db(engine: Engine) -> None:
     """Create missing tables without replacing existing data."""
     # Additive availability tables share this metadata; no old table is altered.
-    from src import availability
+    from src import availability, catalog_storage
 
     # `python -m src.database` runs this file as __main__; use the canonical
     # imported module's metadata so the availability tables are included too.

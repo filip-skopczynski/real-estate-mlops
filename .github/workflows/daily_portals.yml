@@ -1,10 +1,19 @@
-name: Daily OLX and Otodom observations
+name: Warsaw OLX and Otodom catalogue
 
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: Initial catalogue, daily discovery, or broad price refresh
+        type: choice
+        required: true
+        default: daily
+        options:
+          - daily
+          - bootstrap
+          - refresh
       save_db:
-        description: Save validated price observations to the configured database
+        description: Save catalogue, price observations and traversal progress
         type: boolean
         required: false
         default: false
@@ -55,16 +64,17 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' && vars.PORTAL_COLLECTION_ENABLED == 'true'))
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     concurrency:
       group: daily-portal-collection
       cancel-in-progress: false
     env:
       SAVE_TO_DB: ${{ github.event_name == 'schedule' || inputs.save_db }}
       DATABASE_URL: ${{ (github.event_name == 'schedule' || inputs.save_db) && secrets.DATABASE_URL || '' }}
-      OLX_MAX_PAGES: ${{ vars.OLX_MAX_PAGES || '5' }}
-      OTODOM_MAX_PAGES: ${{ vars.OTODOM_MAX_PAGES || '5' }}
-      PORTAL_MAX_LISTINGS: ${{ vars.PORTAL_MAX_LISTINGS || '500' }}
+      CATALOG_MODE: ${{ inputs.mode || 'daily' }}
+      CATALOG_MAX_PAGES: ${{ vars.CATALOG_MAX_PAGES || '1000' }}
+      CATALOG_MAX_LISTINGS: ${{ vars.CATALOG_MAX_LISTINGS || '50000' }}
+      CATALOG_MAX_REQUESTS: ${{ vars.CATALOG_MAX_REQUESTS || '700' }}
       REQUEST_DELAY_SECONDS: ${{ vars.REQUEST_DELAY_SECONDS || '2' }}
     steps:
       - uses: actions/checkout@v7.0.1
@@ -81,13 +91,18 @@ jobs:
           PY
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
-      - name: Collect bounded Warsaw apartment-sale observations
+      - name: Collect Warsaw catalogue and update observations
         run: |
           python - <<'PY'
           import os
           import subprocess
           import sys
-          command = [sys.executable, '-m', 'src.daily_listings']
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          mode = os.environ['CATALOG_MODE']
+          if os.environ['GITHUB_EVENT_NAME'] == 'schedule':
+              mode = 'refresh' if datetime.now(ZoneInfo('Europe/Warsaw')).weekday() == 6 else 'daily'
+          command = [sys.executable, '-m', 'src.catalog_pipeline', '--mode', mode]
           if os.environ['SAVE_TO_DB'] == 'true':
               command.append('--save-db')
           raise SystemExit(subprocess.call(command))
@@ -99,10 +114,10 @@ jobs:
           import json
           import os
           from pathlib import Path
-          report = Path('data/daily_collection_audit.json')
+          report = Path('data/catalog_audit.json')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
-              summary.write('## Bounded Warsaw apartment-sale collection\n\n')
-              summary.write('New means first observed by this database, not newly published. No market-wide completeness, availability or training is inferred.\n\n')
+              summary.write('## Warsaw apartment-sale catalogue\n\n')
+              summary.write('New means first observed by this database. Catalogue traversal and publication dates do not prove market completeness, sale status or model quality.\n\n')
               if not report.exists():
                   summary.write('No audit file was produced; inspect the failed step.\n')
               else:
@@ -114,28 +129,61 @@ jobs:
                           continue
                       label = str(entry.get('source', source))
                       if label not in {'olx', 'otodom', 'www.olx.pl', 'www.otodom.pl'}:
-                          label = 'Source ' + str(source)
+                          label = 'Unknown source'
                       summary.write('### ' + label + '\n\n')
+                      source_audit = entry.get('audit', {})
+                      if not isinstance(source_audit, dict):
+                          source_audit = {}
                       status = entry.get('status')
-                      if status in {'success', 'partial', 'failed', 'ok'}:
+                      if status in {'success', 'partial', 'failed', 'ok', 'completed', 'in_progress', 'leased', 'skipped'}:
                           summary.write('Status: ' + status + '\n\n')
-                      for section in (entry, entry.get('database_statistics', {}), entry.get('audit', {})):
+                      mode = entry.get('executed_mode')
+                      if mode in {'bootstrap', 'daily', 'refresh'}:
+                          summary.write('Mode: ' + mode + '\n\n')
+                      for section in (entry, entry.get('database_statistics', {}), entry.get('catalogue_statistics', {}), source_audit):
                           if not isinstance(section, dict):
                               continue
-                          for key in ('pages_read', 'parsed_listings', 'exported_listings', 'new_listings', 'existing_listings', 'observations_inserted'):
+                          for key in ('pages_read', 'requests', 'parsed_listings', 'exported_listings', 'seen_listings', 'new_catalog_listings', 'catalog_rows_upserted', 'new_listings', 'existing_listings', 'observations_inserted'):
                               value = section.get(key)
                               if type(value) is int and value >= 0:
                                   summary.write('- ' + key + ': ' + str(value) + '\n')
                       summary.write('\n')
-                  summary.write('Download the CSV and full audit artifact to inspect coverage and stop reasons.\n')
+                      checkpoint = entry.get('checkpoint', source_audit.get('checkpoint', {}))
+                      if isinstance(checkpoint, dict):
+                          page = checkpoint.get('page', checkpoint.get('next_page'))
+                          if type(page) is int and page >= 1:
+                              summary.write('Next traversal page: ' + str(page) + '\n\n')
+                      completed = entry.get('completed', source_audit.get('completed'))
+                      if type(completed) is bool:
+                          summary.write('Advertised traversal completed: ' + str(completed).lower() + '\n\n')
+                      phases = entry.get('phases', [])
+                      if isinstance(phases, list):
+                          for phase in phases:
+                              if not isinstance(phase, dict) or phase.get('phase') not in {'bootstrap', 'daily', 'refresh'}:
+                                  continue
+                              audit = phase.get('audit', {})
+                              if not isinstance(audit, dict):
+                                  continue
+                              summary.write('Phase: ' + phase['phase'] + '\n\n')
+                              for key in ('pages_read', 'requests', 'exported_listings'):
+                                  value = audit.get(key)
+                                  if type(value) is int and value >= 0:
+                                      summary.write('- ' + key + ': ' + str(value) + '\n')
+                              checkpoint = audit.get('checkpoint', {})
+                              if isinstance(checkpoint, dict):
+                                  page = checkpoint.get('page', checkpoint.get('next_page'))
+                                  if type(page) is int and page >= 1:
+                                      summary.write('- Next traversal page: ' + str(page) + '\n')
+                              summary.write('\n')
+                  summary.write('Download the catalogue CSV and full audit to inspect source coverage, checkpoints and stop reasons.\n')
           PY
-      - name: Upload observations and audit
+      - name: Upload catalogue and audit
         if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: portal-observations-${{ github.run_id }}
+          name: warsaw-catalogue-${{ github.run_id }}
           path: |
-            data/daily_listings.csv
-            data/daily_collection_audit.json
+            data/catalog.csv
+            data/catalog_audit.json
           if-no-files-found: ignore
           retention-days: 14

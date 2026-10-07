@@ -2,7 +2,7 @@
 
 A Python pipeline that collects apartment asking prices, preserves price and availability history in PostgreSQL, and trains an XGBoost regression model to rank available listings below its predicted asking price.
 
-**Current status:** the Bemovo pilot stores verified asking prices and separate residential availability history in Supabase. On 2026-10-07, the dedicated portal workflow successfully collected and saved **355 observations: 218 OLX and 137 Otodom**, using five public result pages per portal. All 355 prices, areas, room counts and URLs were checked by reading the capture back from Supabase. Daily portal collection is enabled at **06:15 Europe/Warsaw** in this repository. Its coverage is a bounded sample, with source-specific exclusions; it neither infers sold status nor trains on portal data. Offline tests and GitHub CI cover isolated PostgreSQL storage. A fresh checkout requires its own ignored `.env` and separate GitHub secrets/settings. Real Warsaw model quality has not yet been established. The older generic production/training job remains disabled.
+**Current status:** the Bemovo pilot stores verified asking prices and separate residential availability history in Supabase. On 2026-10-07, the earlier five-page portal capture saved **355 observations: 218 OLX and 137 Otodom**; all prices, areas, room counts and URLs were checked by reading Supabase back. The portal pipeline now supports broad initial catalogue traversal, daily discovery and periodic price refresh with persistent checkpoints. Daily collection is enabled at **06:15 Europe/Warsaw**, with Sunday broad refresh. Catalogue rows preserve supported listings with incomplete price/features separately from price observations. Accessible traversal does not prove complete Warsaw coverage or sold status. Real Warsaw model quality has not yet been established; automated portal training and the older generic production/training job remain disabled. A fresh checkout requires its own ignored `.env` and separate GitHub secrets/settings.
 
 ## Architecture
 
@@ -21,8 +21,9 @@ flowchart LR
     J[GitHub Actions: tests; production gated] -.-> B
     L[OLX: one public search page] --> M[Local preview CSV + audit]
     N[Otodom: one public search page] --> M
-    O[Bounded OLX + Otodom page collection] --> P[Price CSV + coverage audit]
-    O -.->|Explicit database write| C
+    O[OLX + Otodom bootstrap / daily / refresh] --> P[Catalogue CSV + coverage audit]
+    O --> Q[(Catalogue + traversal checkpoints)]
+    O -.->|Validated price observations| C
 ```
 
 The browser impersonation profile is `chrome120`. This changes the HTTP/TLS client fingerprint; it does not execute JavaScript or guarantee that a website accepts requests. Responses such as 403/429 stop the fetch. The collector uses bounded pages/listings, timeouts, retries for transient failures and a delay between requests. [curl_cffi documentation](https://curl-cffi.readthedocs.io/en/v0.11.2/impersonate.html)
@@ -184,33 +185,35 @@ The default limit is 20 records, maximum 100, with at least two seconds between 
 
 The project is published at [filip-skopczynski/real-estate-mlops](https://github.com/filip-skopczynski/real-estate-mlops). Source, tests, notebook, requirements and `.env.example` are tracked; credentials, local databases, collected CSV files and model binaries are excluded.
 
-#### Bounded daily OLX and Otodom observations
+#### Warsaw catalogue and daily updates
 
-The dedicated runner can collect consecutive public Warsaw apartment-sale search pages from both portals. Its defaults are five pages per portal, 500 validated listings per portal and at least two seconds between requests. Earlier one-page preview commands remain unchanged.
+The catalogue runner separates initial discovery from daily checks and broader price refresh. Progress is stored per source/mode in PostgreSQL; interrupted traversal can resume across runs. Sources without initial progress automatically bootstrap in daily mode. An unfinished initial traversal gets a daily newest-head check before its remaining work resumes. After initial traversal, daily mode checks up to 30 leading pages plus up to 30 pages of a rotating broad refresh, with up to 60 requests per phase. Sunday refresh uses the larger configured budget. One-page previews and the legacy five-page `src.daily_listings` sample remain available.
 
 ```powershell
-# Inspect local CSV and audit first; no database connection:
-.\.venv\Scripts\python.exe -m src.daily_listings
-# After configuring and checking your own database:
-.\.venv\Scripts\python.exe -m src.daily_listings --save-db
+# Initial local catalogue; no database connection or persistent checkpoint:
+.\.venv\Scripts\python.exe -m src.catalog_pipeline --mode bootstrap
+# After configuring your own database, save rows and resumable progress:
+.\.venv\Scripts\python.exe -m src.catalog_pipeline --mode bootstrap --save-db
+.\.venv\Scripts\python.exe -m src.catalog_pipeline --mode daily --save-db
+.\.venv\Scripts\python.exe -m src.catalog_pipeline --mode refresh --save-db
 ```
 
-Outputs are `data/daily_listings.csv` and `data/daily_collection_audit.json`. The database path atomically saves price observations per source and reports new IDs separately from existing IDs and inserted observations. Here **new means first observed in our database**, not newly published or a newly listed property. Source/listing IDs distinguish listings within a portal; cross-portal apartment deduplication remains unresolved. A failed or interrupted source is reported while validated records from successful pages/sources are retained. Ordinary budget limits are reported as incomplete coverage, not as transport failures. No availability snapshot, disappearance inference or model training is performed.
+Outputs are `data/catalog.csv` and `data/catalog_audit.json`. Use `--source olx|otodom|both` to select portals. Sparse catalogue rows retain stable IDs/URLs when price, area or exact rooms are unknown; OLX's four-or-more group has no invented exact room count. Existing price tables receive rows only with verified positive total PLN price and area. Publication dates are separate, source-provided fields when verified. **New means first observed in this database.** Cross-portal apartment deduplication remains unresolved. A source failure retains validated captured rows and reports the unfinished work. Budget stops preserve a checkpoint and incomplete traversal. No availability snapshot, disappearance inference or model training is performed.
 
-The separate workflow `.github/workflows/daily_portals.yml`, named **Daily OLX and Otodom observations**, was enabled in this repository on 2026-10-07 after a successful [manual capture and database write](https://github.com/filip-skopczynski/real-estate-mlops/actions/runs/37640796024). Its `DATABASE_URL` is an encrypted repository secret; `PORTAL_COLLECTION_ENABLED=true` enables the schedule. For a separate deployment, first test it manually through Actions with `save_db` unchecked, add your own database secret, then verify a manual run with `save_db` checked before enabling the flag. Captures and audits are uploaded for 14 days. Tests use an isolated PostgreSQL 16 service.
+The workflow `.github/workflows/daily_portals.yml`, named **Warsaw OLX and Otodom catalogue**, replaces the earlier five-page schedule enabled after this [manual capture and database write](https://github.com/filip-skopczynski/real-estate-mlops/actions/runs/37640796024). Its `DATABASE_URL` is an encrypted repository secret; `PORTAL_COLLECTION_ENABLED=true` enables scheduling. Manual runs select `bootstrap`, `daily` or `refresh`; database writes default to false. A manual bootstrap with writes starts the initial traversal. For a separate deployment, first inspect a manual capture without writes, configure your own database secret, then verify storage before enabling the schedule. Captures/audits are artifacts for 14 days; tests use isolated PostgreSQL 16.
 
 | Type | Name | Default / purpose |
 | --- | --- | --- |
 | Secret | `DATABASE_URL` | Supabase Session pooler URI with SSL, required only for writes |
 | Variable | `PORTAL_COLLECTION_ENABLED` | Absent/false keeps daily portal collection disabled |
-| Variable | `OLX_MAX_PAGES` | `5` |
-| Variable | `OTODOM_MAX_PAGES` | `5` |
-| Variable | `PORTAL_MAX_LISTINGS` | `500` per source |
+| Variable | `CATALOG_MAX_PAGES` | `1000` per source |
+| Variable | `CATALOG_MAX_LISTINGS` | `50000` per source |
+| Variable | `CATALOG_MAX_REQUESTS` | `700` per source |
 | Variable | `REQUEST_DELAY_SECONDS` | `2`, minimum two seconds |
 
-The new schedule targets **06:15 Warsaw time** using `timezone: Europe/Warsaw`. GitHub schedules use the default branch, can be delayed or dropped, and are disabled in public repositories after 60 days without repository activity. Collection also requires `main`. [GitHub timezone syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onschedule), [scheduled workflow limitations](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
+The schedule targets **06:15 Warsaw time** using `timezone: Europe/Warsaw`. Sunday runs use `refresh`; other days use `daily`, with the execution date evaluated in Warsaw. A shared concurrency group prevents old/new portal jobs overlapping. GitHub schedules use the default branch, can be delayed or dropped, and are disabled in public repositories after 60 days without activity. Collection also requires `main`. [GitHub timezone syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onschedule), [scheduled workflow limitations](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
 
-This is bounded sampling, not all listings: a captured OLX search reported 4437 visible results but only 1000 results / 25 pages in its accessible search metadata; Otodom reported 20,252 results / 563 pages. Default ordering is not verified as newest publication ordering. Promoted/refreshed listings and shifting pages may cause omissions, and source-specific parser exclusions still apply. Portal reuse/training terms remain unresolved; Otodom signals `ai-input=no, ai-train=no`. Keep automated training separate. See the Polish [daily collection guide](docs/DAILY_COLLECTION.md) for local checks, database setup, activation and coverage limits.
+Coverage is measured against accessible advertised traversal. A captured OLX search reported 4437 visible results but only 1000 results / 25 accessible pages; Otodom reported 20,252 results / 563 pages. OLX bootstrap/refresh now bisect capped searches into verified public price ranges, preserving overlapping boundaries and reporting unresolved capped ranges. Missing-price offers remain a coverage limitation. OLX uses verified `search[order]=created_at:desc`; Otodom uses verified `by=LATEST&direction=DESC`. Daily head scans read their entire configured window without stopping at the first known ID. Reaching the end of advertised pages cannot prove every Warsaw listing was found; shifting/promoted/relisted ads require overlap and refresh. Unknown fields stay missing; development cards and HPR copies remain excluded. Portal reuse/training terms remain unresolved; Otodom signals `ai-input=no, ai-train=no`. See the Polish [collection guide](docs/DAILY_COLLECTION.md) for checkpoint semantics, database setup and limitations. Legacy sample variables `OLX_MAX_PAGES`, `OTODOM_MAX_PAGES` and `PORTAL_MAX_LISTINGS` do not configure this workflow.
 
 #### Existing generic pipeline
 
@@ -236,6 +239,8 @@ The cron expression runs daily at **05:15 UTC** (06:15/07:15 in Warsaw depending
 ## Data and model design
 
 `listings` stores the latest known asking price keyed by `(source, listing_id)`. `listing_observations` stores price history keyed by `(source, listing_id, observed_at)`. Older price observations cannot roll the current price backwards. These tables retain historical prices when an apartment becomes unavailable; a sold status never converts its asking price into a transaction price. Observations record **fetch time**, not an unverified publication date.
+
+`listing_catalog` stores supported portal IDs and sparse fields even where a price observation cannot be formed. Its first/last-seen timestamps describe actual discovery. `collection_progress` stores source/mode checkpoints, completion and time-limited process leases. Additive creation preserves existing tables; new PostgreSQL tables enable RLS. Completion describes advertised traversal, not market-wide coverage. Price freshness is the last real price check; a daily discovery run does not update every known listing's price clock.
 
 Three additional tables separate inventory checks from price history:
 
@@ -276,4 +281,4 @@ Offline tests exercise parsing, bounded network behaviour, database price histor
 3. Improve cross-listing duplicate detection and property features before claiming deal quality; evaluate transaction prices in a separate task.
 4. Add model version/promotion rules, data freshness checks and a small prediction API when the data/model are reliable.
 
-The portal observations job runs daily; the complete Bemovo inventory pilot still runs manually. The chosen scope uses Python collectors and XGBoost without an LLM agent or OpenAI API integration, aiming to stay within free service allowances. Portal capture does not trigger model training.
+The portal catalogue job runs daily with a Sunday broad refresh; the complete Bemovo inventory pilot still runs manually. The chosen scope uses Python collectors and XGBoost without an LLM agent or OpenAI API integration, aiming to stay within free service allowances. Portal capture does not trigger model training.

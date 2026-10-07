@@ -183,5 +183,6 @@ def test_database_module_entrypoint_initializes_all_additive_tables(tmp_path):
     assert set(inspect(engine).get_table_names()) == {
         "listings", "listing_observations", "inventory_snapshots",
         "listing_availability", "listing_availability_observations",
+        "listing_catalog", "collection_progress",
     }
     engine.dispose()

@@ -25,6 +25,11 @@ SOURCE = "www.olx.pl"
 SEARCH_PATH = "/nieruchomosci/mieszkania/sprzedaz/warszawa/"
 CATEGORY_PATH = "nieruchomosci/mieszkania/sprzedaz"
 ROOMS = {"one": 1, "two": 2, "three": 3}
+CATALOG_FIELDS = (
+    "source", "listing_id", "url", "city", "district", "price_pln", "area_m2",
+    "rooms", "rooms_min", "floor", "build_year", "latitude", "longitude",
+    "distance_km", "published_at", "observed_at",
+)
 ASSIGNMENT = re.compile(r"(?:^|;)\s*window\.__PRERENDERED_STATE__\s*=\s*")
 
 
@@ -159,7 +164,7 @@ def _coordinates(ad):
     return lat, lon, distance
 
 
-def _record(ad, page_url, observed_at):
+def _record(ad, page_url, observed_at, *, sparse=False):
     if not isinstance(ad, dict):
         raise ValueError("pozycja nie jest ofertą")
     category, location = ad.get("category"), ad.get("location")
@@ -182,20 +187,27 @@ def _record(ad, page_url, observed_at):
     if parts.scheme != "https" or parts.netloc != SOURCE or not re.fullmatch(r"/d/oferta/[^/]+\.html", parts.path):
         raise ValueError("adres oferty poza OLX lub nieznany format")
     price = ad.get("price")
-    if not isinstance(price, dict) or any(price.get(flag) is True for flag in ("budget", "free", "exchange")):
+    ordinary_price = isinstance(price, dict) and not any(price.get(flag) is True for flag in ("budget", "free", "exchange"))
+    if not ordinary_price and not sparse:
         raise ValueError("brak zwykłej ceny sprzedaży")
-    regular = price.get("regularPrice")
-    if not isinstance(regular, dict) or regular.get("currencyCode") != "PLN":
+    regular = price.get("regularPrice") if ordinary_price else None
+    is_pln = isinstance(regular, dict) and regular.get("currencyCode") == "PLN"
+    if not is_pln and not sparse:
         raise ValueError("brak ceny całkowitej w PLN")
-    amount = _number(regular.get("value"))
-    if amount is None or amount <= 0:
+    amount = _number(regular.get("value")) if is_pln else None
+    if (amount is None or amount <= 0) and not sparse:
         raise ValueError("nieprawidłowa cena całkowita")
-    params = _parameters(ad)
+    amount = amount if amount is not None and amount > 0 else None
+    # A missing feature list is allowed in discovery. A contradictory list is
+    # still rejected; broad discovery must not conceal structural corruption.
+    params = {} if sparse and ad.get("params") is None else _parameters(ad)
     area = _number(params.get("m", {}).get("normalizedValue"))
-    if area is None or area <= 0:
+    if (area is None or area <= 0) and not sparse:
         raise ValueError("brak dodatniego metrażu")
-    rooms = ROOMS.get(params.get("rooms", {}).get("normalizedValue"))
-    if rooms is None:
+    area = area if area is not None and area > 0 else None
+    room_code = params.get("rooms", {}).get("normalizedValue")
+    rooms = ROOMS.get(room_code)
+    if rooms is None and not sparse:
         raise ValueError("brak dokładnej liczby pokoi (4 i więcej też jest nieokreślone)")
     floor_code = params.get("floor_select", {}).get("normalizedValue")
     floor = None
@@ -204,10 +216,17 @@ def _record(ad, page_url, observed_at):
     district = location.get("districtName")
     district = district.strip() if isinstance(district, str) and district.strip() else None
     lat, lon, distance = _coordinates(ad)
-    return dict(zip(FIELDS, (
+    result = dict(zip(FIELDS, (
         SOURCE, str(listing_id), url, "Warszawa", district, amount, area, rooms,
         floor, None, lat, lon, distance, observed_at,
     )))
+    if sparse:
+        # Public JSON exposes createdTime, but its relationship to the first
+        # publication date has not been verified. Never infer publication from
+        # creation, lastRefreshTime, or our observation clock.
+        result.update(rooms_min=4 if room_code == "four" else None, published_at=None)
+        return {field: result[field] for field in CATALOG_FIELDS}
+    return result
 
 
 def _parse_page(html, page_url, observed_at, expected_page, allow_empty):
@@ -274,3 +293,75 @@ def parse_olx_search_page(html, page_url, observed_at=None, *, expected_page=1):
     the collector decides whether the first page is usable.
     """
     return _parse_page(html, page_url, observed_at, expected_page, True)
+
+
+def parse_olx_catalog_page(html, page_url, observed_at=None, *, expected_page=1):
+    """Read a sparse discovery inventory, retaining verified missing features.
+
+    Public price filters and newest sorting must be echoed by both the request
+    state and applied search parameters. ``four`` means a lower bound of four
+    rooms, never an exact count. Publication time stays unknown until verified;
+    source creation/refresh times never substitute for our observation time.
+    """
+    _search_url(page_url, expected_page)
+    if not isinstance(html, str) or not html.strip():
+        raise ValueError("Pusty HTML katalogu OLX.")
+    moment = _observed_at(observed_at)
+    catalogue = _catalogue(_state(BeautifulSoup(html, "html.parser")), expected_page)
+    pairs = parse_qsl(urlsplit(page_url).query, keep_blank_values=True)
+    if len({key for key, _ in pairs}) != len(pairs):
+        raise ValueError("Powtórzone parametry adresu katalogu OLX.")
+    query = dict(pairs)
+    applied, requested = catalogue.get("params"), catalogue["requestParams"].get("params")
+    required = {
+        "search[order]": "sort_by",
+        "search[filter_float_price:from]": "filter_float_price:from",
+        "search[filter_float_price:to]": "filter_float_price:to",
+    }
+    for public_key, internal_key in required.items():
+        # OLX echoes a zero lower bound in requestParams but normalizes it away
+        # from applied params. Verified public zero-result search, 2026-10-07.
+        normalized_zero = (
+            public_key == "search[filter_float_price:from]" and query.get(public_key) == "0"
+            and isinstance(applied, dict) and internal_key not in applied
+        )
+        if public_key in query and (
+            not isinstance(applied, dict) or not isinstance(requested, dict)
+            or (applied.get(internal_key) != query[public_key] and not normalized_zero)
+            or requested.get(public_key) != query[public_key]
+        ):
+            raise ValueError("OLX nie potwierdza zastosowania filtrów lub kolejności katalogu.")
+    ads = catalogue["ads"]
+    records, urls, rejected = {}, {}, {}
+    for ad in ads:
+        try:
+            row = _record(ad, page_url, moment, sparse=True)
+        except (ValueError, TypeError) as exc:
+            reason = str(exc)
+            rejected[reason] = rejected.get(reason, 0) + 1
+            continue
+        identity = row["listing_id"]
+        if identity in records and records[identity] != row:
+            raise ValueError("Sprzeczne dane identyfikatora katalogu OLX.")
+        if row["url"] in urls and urls[row["url"]] != identity:
+            raise ValueError("Sprzeczne identyfikatory adresu katalogu OLX.")
+        records[identity], urls[row["url"]] = row, identity
+    metadata = {
+        "page": expected_page, "page_number": expected_page - 1,
+        "raw_items": len(ads), "parsed_listings": len(records),
+        "skipped_items": sum(rejected.values()), "skip_reasons": rejected,
+        "verified_order": applied.get("sort_by") if isinstance(applied, dict) else None,
+    }
+    for source_key, key in (("totalPages", "total_pages"), ("totalElements", "total_elements"), ("visibleElements", "visible_elements")):
+        value = catalogue.get(source_key)
+        if type(value) is not int or value < 0:
+            raise ValueError("Brak poprawnych metadanych paginacji katalogu OLX.")
+        metadata[key] = value
+    zero = metadata["total_elements"] == metadata["visible_elements"] == 0
+    if zero and (ads or metadata["total_pages"] not in {0, 1} or expected_page != 1):
+        raise ValueError("Sprzeczne metadane pustego katalogu OLX.")
+    if not zero and (not ads or metadata["total_pages"] < expected_page):
+        raise ValueError("Strona katalogu OLX nie potwierdza deklarowanych wyników.")
+    metadata["reported_result_cap"] = metadata["visible_elements"] > metadata["total_elements"]
+    metadata["verified_zero_results"] = zero
+    return list(records.values()), metadata

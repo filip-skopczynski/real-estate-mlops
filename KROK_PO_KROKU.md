@@ -43,13 +43,15 @@ W `models/metrics.json` porównaj `xgboost.mae_pln` z `baseline_median.mae_pln`.
 | `src/fetch_otodom.py` | Podgląd jednej strony Otodom oraz osobna funkcja do ograniczonego pobierania kolejnych stron |
 | `src/otodom.py` | Wyciąga i sprawdza cechy mieszkań z pobranego HTML Otodom; sam nie łączy się z internetem |
 | `src/database.py` | Łączy się z bazą oraz zapisuje ostatnie znane ceny i ich historię |
-| `src/daily_listings.py` | Łączy ograniczone pobrania OLX i Otodom, zapisuje raport i opcjonalnie historię cen w bazie |
+| `src/daily_listings.py` | Zachowuje dawny test ograniczonej próbki OLX i Otodom |
+| `src/catalog_pipeline.py` | Łączy pobranie startowe, codzienne odkrywanie i szersze odświeżanie cen |
+| `src/catalog_storage.py` | Zapisuje niepełne rekordy ogłoszeń oraz punkty wznowienia przeglądów |
 | `src/availability.py` | Zapisuje pełny spis mieszkań, bieżące statusy i historię dostępności razem z cenami |
 | `src/preprocess.py` | Czyści dane, usuwa powtórzenia i przygotowuje CSV |
 | `src/train.py` | Rozdziela dane, uczy XGBoost, mierzy błędy i ocenia najnowsze oferty |
 | `notebooks/01_eda.ipynb` | Pomaga zrozumieć rozkłady danych oraz brakujące wartości |
 | `.github/workflows/scraper_pipeline.yml` | Uruchamia testy i później codzienny przepływ na GitHub |
-| `.github/workflows/daily_portals.yml` | Osobny harmonogram obserwacji OLX i Otodom, włączany zmienną GitHuba |
+| `.github/workflows/daily_portals.yml` | Codzienny spis OLX i Otodom oraz niedzielne odświeżanie; można też uruchomić pobranie startowe |
 | `.env.example` | Pokazuje ustawienia; prawdziwe wartości trzymasz w lokalnym `.env` |
 
 Najpierw zrozum pojedynczy rekord oferty, potem zapis w bazie. Na końcu przejdziemy przez trening. To ułatwi Ci wyjaśnienie projektu na rozmowie rekrutacyjnej.
@@ -128,7 +130,7 @@ Na tym etapie nie trenujemy jeszcze modelu rynku Warszawy: jeden dzień i jedna 
 
 ## 6. Dopiero wtedy uruchom GitHub
 
-Repozytorium jest już opublikowane: [filip-skopczynski/real-estate-mlops](https://github.com/filip-skopczynski/real-estate-mlops). Testy uruchamiają się po zmianach kodu. **Na razie nie ustawiaj `PIPELINE_ENABLED=true`** — stare zadanie produkcyjne korzysta z ogólnego parsera JSON-LD. Nie uruchamia adapterów Bemovo, OLX ani Otodom. Dla obserwacji portali dodaliśmy osobny harmonogram, opisany w punkcie 8; nie jest jeszcze włączony w ustawieniach GitHuba. Pozostałe ustawienia są opisane w README.
+Repozytorium jest już opublikowane: [filip-skopczynski/real-estate-mlops](https://github.com/filip-skopczynski/real-estate-mlops). Testy uruchamiają się po zmianach kodu. **Nie ustawiaj `PIPELINE_ENABLED=true`** — stare zadanie produkcyjne korzysta z ogólnego parsera JSON-LD. Nie uruchamia adapterów Bemovo, OLX ani Otodom. Osobny harmonogram portali jest już włączony; opisujemy go w punkcie 8. Pozostałe ustawienia są opisane w README.
 
 Po podłączeniu źródła codzienny harmonogram będzie aktualizował obserwacje w bazie. Gdy zbierzemy odpowiednio różnorodne dane i historię, przejdziemy do modelu i oceny jego błędów. To codzienne odświeżanie danych; zbieranie w każdej sekundzie wymagałoby innej architektury.
 
@@ -176,24 +178,31 @@ Także tutaj limit wynosi domyślnie 20 rekordów, maksymalnie 100, a opóźnien
 
 Próbka Otodom również nie jest pełnym katalogiem i nie pozwala uznać zniknięcia oferty za sprzedaż. robots.txt zawiera `search=yes, ai-input=no, ai-train=no`; nie ustaliliśmy uprawnień do treningu modelu na tych ofertach. Dokładny zakres parsera opisuje [źródło Otodom](docs/SOURCE_OTODOM.md). Powyższe polecenia są nadal podglądami jednej strony. Nowe pobieranie wielu stron uruchomisz osobnym poleceniem poniżej.
 
-## 8. Codzienne obserwacje OLX i Otodom
+## 8. Spis Warszawy i codzienne aktualizacje
 
-Najpierw uruchom lokalnie bez zapisu do bazy:
-
-```powershell
-.\.venv\Scripts\python.exe -m src.daily_listings
-```
-
-Otwórz `data/daily_listings.csv` i `data/daily_collection_audit.json`. Domyślnie program sprawdza do pięciu publicznych stron każdego portalu i zapisuje do 500 poprawnych rekordów na źródło. To Warszawa i sprzedaż mieszkań, a nie cały serwis. OLX ogranicza także samo wyszukiwanie; domyślna kolejność ofert nie jest potwierdzona jako kolejność nowych publikacji. Raport pokazuje zakres pobrania i przerwane źródła.
-
-Po sprawdzeniu próbki i konfiguracji swojego `.env` możesz dopisać historię do Supabase:
+Dodaliśmy trzy tryby: `bootstrap` buduje początkowy spis, `daily` odkrywa ogłoszenia i sprawdza dalsze wyniki, a `refresh` robi szerszy przegląd cen. Najpierw uruchom lokalnie bez zapisu do bazy:
 
 ```powershell
-.\.venv\Scripts\python.exe -m src.daily_listings --save-db
+.\.venv\Scripts\python.exe -m src.catalog_pipeline --mode bootstrap
 ```
 
-„Nowa oferta” w raporcie to pierwszy zapis identyfikatora w naszej bazie. Stare ogłoszenie pierwszy raz zauważone dziś też jest dla nas nowe. Znane identyfikatory aktualizują ostatnią cenę i dostają kolejną obserwację; ich wcześniejsza historia pozostaje w bazie. Program nie oznacza brakujących ofert jako sprzedanych i nie uruchamia modelu. Duplikaty tego samego mieszkania pomiędzy portalami wymagają późniejszego rozwiązania.
+Otwórz `data/catalog.csv` i `data/catalog_audit.json`. Budżet początkowego spisu wynosi do 1000 stron, 50 000 ogłoszeń oraz 700 żądań na źródło, z przerwą co najmniej dwóch sekund. Sprawdzamy wyłącznie sprzedaż mieszkań w Warszawie. Raport pokazuje zakres, limity i punkt wznowienia. OLX ogranicza także samo wyszukiwanie, więc koniec dostępnych stron nie oznacza pełnego rynku.
 
-W tym repozytorium workflow **Daily OLX and Otodom observations** jest już aktywny: codziennie około **06:15 czasu Warszawy** pobiera ograniczony zakres i dopisuje obserwacje do Supabase, również przy wyłączonym komputerze. Sekret `DATABASE_URL` jest ustawiony prywatnie; zmienna `PORTAL_COLLECTION_ENABLED=true` włącza harmonogram. Ręczna próba z 7 października 2026 zapisała 355 obserwacji: 218 z OLX i 137 z Otodom. Ich ceny, metraże, pokoje i linki sprawdziliśmy przez odczyt z bazy. Wyniki poszczególnych przebiegów otworzysz w **Actions → Daily OLX and Otodom observations → Artifacts**. Stare `PIPELINE_ENABLED` pozostaw wyłączone.
+Po sprawdzeniu konfiguracji `.env` możesz zapisać do Supabase spis, historię cen i postęp:
 
-Dokładne kroki, ustawienia limitów, znaczenie liczników i ograniczenia znajdziesz w [instrukcji codziennego pobierania](docs/DAILY_COLLECTION.md). Warunki korzystania ze źródeł oraz treningu nadal wymagają ustalenia; ten harmonogram zbiera wyłącznie obserwacje.
+```powershell
+.\.venv\Scripts\python.exe -m src.catalog_pipeline --mode bootstrap --save-db
+# Późniejsze codzienne sprawdzanie i szersze odświeżanie:
+.\.venv\Scripts\python.exe -m src.catalog_pipeline --mode daily --save-db
+.\.venv\Scripts\python.exe -m src.catalog_pipeline --mode refresh --save-db
+```
+
+Tabela `listing_catalog` zapisuje także rozpoznane ogłoszenia z brakującą ceną, metrażem lub dokładną liczbą pokoi. Dla OLX „4 i więcej” zachowujemy brak dokładnej liczby, bez odgadywania. Historia cen w `listings` i `listing_observations` wymaga potwierdzonej ceny całkowitej w PLN i metrażu. `collection_progress` przechowuje miejsce przerwanego przeglądu. Zapis postępu pozwala kolejnemu uruchomieniu kontynuować dalsze strony. Bez `--save-db` trwały postęp nie jest zapisany.
+
+„Nowa oferta” w raporcie to pierwszy zapis identyfikatora w naszej bazie. Stare ogłoszenie pierwszy raz zauważone dziś też jest dla nas nowe. Czas odczytu i ewentualna potwierdzona data publikacji to osobne informacje. Ponownie odczytane identyfikatory aktualizują cenę i dostają obserwację; wcześniejsza historia pozostaje w bazie. Cena starego ogłoszenia zachowuje wcześniejszy czas sprawdzenia do chwili rzeczywistego ponownego pobrania. Program nie oznacza brakujących ofert jako sprzedanych i nie uruchamia modelu. Duplikaty tego samego mieszkania pomiędzy portalami wymagają osobnego rozwiązania.
+
+Workflow **Warsaw OLX and Otodom catalogue** działa codziennie około **06:15 czasu Warszawy**, również przy wyłączonym komputerze. W niedzielę wybiera szerszy `refresh`; w pozostałe dni `daily`. Pierwszy spis rozpoczyna się automatycznie, gdy brakuje postępu. Przy nieukończonym spisie codzienne zadanie najpierw sprawdza najnowsze wyniki, potem wznawia dalsze strony. Po ukończeniu spisu odczytuje do 30 początkowych stron i do 30 stron rotującego przeglądu. OLX dzieli wyszukiwania z pułapem wyników na mniejsze zakresy cen. Publiczne sortowanie najnowszych wyników potwierdziliśmy na obu portalach; odczytujemy cały zaplanowany zakres, bez kończenia na pierwszym znanym ID. Sekret `DATABASE_URL` jest ustawiony prywatnie, a `PORTAL_COLLECTION_ENABLED=true` włącza harmonogram.
+
+W **Actions → Warsaw OLX and Otodom catalogue → Run workflow** wybierasz tryb. Ręczny `bootstrap` z zaznaczonym **save_db** uruchamia zapis spisu startowego. Bez tego zaznaczenia dostaniesz CSV i raport, bez zapisu do Supabase. Wyniki otworzysz w **Artifacts**. Ręczna wcześniejsza próba pięciu stron z 7 października 2026 zapisała 355 obserwacji: 218 z OLX i 137 z Otodom; ich dane sprawdziliśmy odczytem z bazy. Te liczby opisują próbkę, nie wynik nowego spisu startowego. Stare `PIPELINE_ENABLED` pozostaw wyłączone.
+
+Dokładne kroki, ustawienia `CATALOG_*`, znaczenie postępu i ograniczenia znajdziesz w [instrukcji codziennego pobierania](docs/DAILY_COLLECTION.md). Dawne `src.daily_listings` i jego ustawienia pięciu stron pozostają osobnym testem próbki. Warunki korzystania ze źródeł oraz treningu nadal wymagają ustalenia; harmonogram zbiera spis i obserwacje.

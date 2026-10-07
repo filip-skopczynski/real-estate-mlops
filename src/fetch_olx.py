@@ -41,6 +41,10 @@ class OLXError(ValueError):
     """The preview cannot be collected or validated safely."""
 
 
+class OLXRequestBudget(OLXError):
+    """A resumable request budget was reached before making another request."""
+
+
 def _validate_origin(url):
     if not isinstance(url, str) or not url or re.search(r"[\x00-\x20\x7f\\]", url):
         raise OLXError("Adres źródła jest nieprawidłowy.")
@@ -161,7 +165,7 @@ def _read_stream(response, maximum):
     return bytes(content)
 
 
-def _fetch_resource(session, url, *, maximum, delay, sleep, counts, kind, policy=None, expected_page=1):
+def _fetch_resource(session, url, *, maximum, delay, sleep, counts, kind, policy=None, expected_page=1, max_requests=None):
     """Bound streaming, retries and redirects; check robots before each HTML URL."""
     from curl_cffi.requests.exceptions import Timeout as CurlTimeout
 
@@ -175,6 +179,8 @@ def _fetch_resource(session, url, *, maximum, delay, sleep, counts, kind, policy
             _validate_origin(current)
         for attempt in range(MAX_ATTEMPTS):
             response = None
+            if max_requests is not None and sum(counts.values()) >= max_requests:
+                raise OLXRequestBudget("Osiągnięto budżet żądań OLX; zapisano punkt wznowienia.")
             sleep(delay * 2**attempt)
             counts[kind] += 1
             try:
@@ -652,6 +658,13 @@ def collect_olx_search(*, url=DEFAULT_URL, max_pages=5, max_listings=500, delay=
     report["skipped_items"] = sum(item["skipped_items"] for item in report["page_metadata"])
     report["reported_result_cap"] = any(item["reported_result_cap"] for item in report["page_metadata"])
     return records, report
+
+
+def collect_olx_catalog(**kwargs):
+    """Explicit opt-in to sparse catalogue discovery and resumable traversal."""
+    from .olx_catalog import collect_olx_catalog as collect
+
+    return collect(**kwargs)
 
 
 def _write_preview(records, report, output, audit_output):
