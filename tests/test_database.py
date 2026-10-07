@@ -132,6 +132,39 @@ class StorageContract:
         for frame in (self.observations(), self.current()):
             self.assertTrue(all(type(column) is str for column in frame.columns))
 
+    def test_discovery_report_distinguishes_new_ids_from_history(self):
+        first = database.upsert_listings_report(self.engine, [self.listing()])
+        self.assertEqual(first, {"seen_listings": 1, "new_listings": 1,
+                                 "existing_listings": 0, "observations_inserted": 1})
+        later = database.upsert_listings_report(self.engine, [
+            self.listing(price_pln=1_100_000, observed_at=self.timestamp + timedelta(days=1)),
+            self.listing(listing_id="456", observed_at=self.timestamp + timedelta(days=1)),
+        ])
+        self.assertEqual(later, {"seen_listings": 2, "new_listings": 1,
+                                 "existing_listings": 1, "observations_inserted": 2})
+        self.assertEqual(float(self.current().loc[self.current()["listing_id"] == "123", "price_pln"].iloc[0]), 1_100_000)
+        self.assertEqual(len(self.observations()), 3)
+
+    def test_discovery_report_replay_and_empty_batch(self):
+        database.upsert_listings_report(self.engine, [self.listing()])
+        replay = database.upsert_listings_report(self.engine, [self.listing(price_pln=1)])
+        self.assertEqual(replay["new_listings"], 0)
+        self.assertEqual(replay["existing_listings"], 1)
+        self.assertEqual(replay["observations_inserted"], 0)
+        self.assertEqual(float(self.current().iloc[0]["price_pln"]), 1_200_000)
+        self.assertEqual(database.upsert_listings_report(self.engine, []), {
+            "seen_listings": 0, "new_listings": 0, "existing_listings": 0, "observations_inserted": 0,
+        })
+
+    def test_discovery_report_rolls_back_and_rejects_duplicate_ids(self):
+        with self.assertRaises(IntegrityError):
+            database.upsert_listings_report(self.engine, [self.listing(), self.listing(listing_id="bad", price_pln=-1)])
+        self.assertTrue(self.current().empty)
+        self.assertTrue(self.observations().empty)
+        with self.assertRaises(ValueError):
+            database.upsert_listings_report(self.engine, [self.listing(), self.listing()])
+        self.assertTrue(self.current().empty)
+
 
 class TestSQLiteStorage(StorageContract, unittest.TestCase):
     expected_dialect = "sqlite"

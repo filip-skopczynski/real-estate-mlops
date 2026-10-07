@@ -38,12 +38,18 @@ W `models/metrics.json` porównaj `xgboost.mae_pln` z `baseline_median.mae_pln`.
 | `src/bemovo_prices.py` | Czyta cennik z dane.gov.pl i sprawdza dewelopera, adres oraz daty ważności |
 | `src/bemovo_features.py` | Czyta metraż, pokoje, piętro i dostępność z danych publicznej strony Bemovo |
 | `src/fetch_data.py` | Ogólny parser JSON-LD, przydatny do innych źródeł po ich sprawdzeniu |
+| `src/fetch_olx.py` | Podgląd jednej strony OLX oraz osobna funkcja do ograniczonego pobierania kolejnych stron |
+| `src/olx.py` | Wyciąga i sprawdza cechy mieszkań z pobranego HTML OLX; sam nie łączy się z internetem |
+| `src/fetch_otodom.py` | Podgląd jednej strony Otodom oraz osobna funkcja do ograniczonego pobierania kolejnych stron |
+| `src/otodom.py` | Wyciąga i sprawdza cechy mieszkań z pobranego HTML Otodom; sam nie łączy się z internetem |
 | `src/database.py` | Łączy się z bazą oraz zapisuje ostatnie znane ceny i ich historię |
+| `src/daily_listings.py` | Łączy ograniczone pobrania OLX i Otodom, zapisuje raport i opcjonalnie historię cen w bazie |
 | `src/availability.py` | Zapisuje pełny spis mieszkań, bieżące statusy i historię dostępności razem z cenami |
 | `src/preprocess.py` | Czyści dane, usuwa powtórzenia i przygotowuje CSV |
 | `src/train.py` | Rozdziela dane, uczy XGBoost, mierzy błędy i ocenia najnowsze oferty |
 | `notebooks/01_eda.ipynb` | Pomaga zrozumieć rozkłady danych oraz brakujące wartości |
 | `.github/workflows/scraper_pipeline.yml` | Uruchamia testy i później codzienny przepływ na GitHub |
+| `.github/workflows/daily_portals.yml` | Osobny harmonogram obserwacji OLX i Otodom, włączany zmienną GitHuba |
 | `.env.example` | Pokazuje ustawienia; prawdziwe wartości trzymasz w lokalnym `.env` |
 
 Najpierw zrozum pojedynczy rekord oferty, potem zapis w bazie. Na końcu przejdziemy przez trening. To ułatwi Ci wyjaśnienie projektu na rozmowie rekrutacyjnej.
@@ -122,6 +128,72 @@ Na tym etapie nie trenujemy jeszcze modelu rynku Warszawy: jeden dzień i jedna 
 
 ## 6. Dopiero wtedy uruchom GitHub
 
-Repozytorium jest już opublikowane: [filip-skopczynski/real-estate-mlops](https://github.com/filip-skopczynski/real-estate-mlops). Testy uruchamiają się po zmianach kodu. **Na razie nie ustawiaj `PIPELINE_ENABLED=true`** — zadanie produkcyjne korzysta z ogólnego parsera JSON-LD, a pilotaż Bemovo uruchamiamy ręcznie. Najpierw połączymy harmonogram z adapterem i atomowym zapisem cen oraz dostępności. Pozostałe ustawienia są opisane w README.
+Repozytorium jest już opublikowane: [filip-skopczynski/real-estate-mlops](https://github.com/filip-skopczynski/real-estate-mlops). Testy uruchamiają się po zmianach kodu. **Na razie nie ustawiaj `PIPELINE_ENABLED=true`** — stare zadanie produkcyjne korzysta z ogólnego parsera JSON-LD. Nie uruchamia adapterów Bemovo, OLX ani Otodom. Dla obserwacji portali dodaliśmy osobny harmonogram, opisany w punkcie 8; nie jest jeszcze włączony w ustawieniach GitHuba. Pozostałe ustawienia są opisane w README.
 
 Po podłączeniu źródła codzienny harmonogram będzie aktualizował obserwacje w bazie. Gdy zbierzemy odpowiednio różnorodne dane i historię, przejdziemy do modelu i oceny jego błędów. To codzienne odświeżanie danych; zbieranie w każdej sekundzie wymagałoby innej architektury.
+
+## 7. OLX i Otodom
+
+Wybraliśmy wersję bez agenta językowego i bez OpenAI API. Pobieranie i przetwarzanie wykonuje Python, a wycenę XGBoost.
+
+### Podgląd OLX
+
+Pierwsze sprawdzenie publicznych stron z 7 października 2026 zakończyło się poprawnymi odpowiedziami HTTP, ale ogólny parser JSON-LD nie odczytał kompletnych rekordów mieszkań. Dodaliśmy osobny parser OLX do lokalnego podglądu jednej strony z mieszkaniami na sprzedaż w Warszawie:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.fetch_olx --max-listings 20 --delay 2
+# Przykład bez sieci, na fikcyjnych ofertach z testów:
+.\.venv\Scripts\python.exe -m src.fetch_olx --html tests/fixtures/olx_search.html --output data/olx_offline_preview.csv --audit data/olx_offline_audit.json
+```
+
+Otwórz `data/olx_preview.csv` i porównaj cenę, metraż, pokoje oraz link z ofertą. W `data/olx_preview_audit.json` znajdziesz raport pobrania i odczytu. Do tego podglądu nie konfigurujesz `.env` ani Supabase. Program nie dopisuje obserwacji do bazy i nie uruchamia modelu.
+
+Pierwsze pobranie na żywo 7 października 2026 zapisało lokalnie 20 ofert. Niezależnie porównaliśmy ceny i metraż 43 rekordów ze starszej próbki HTML z widocznymi kartami tej samej strony — wszystkie się zgadzały. To sprawdza poprawność odczytu, a nie jakość modelu ani prawdziwość informacji sprzedającego.
+
+Domyślny limit to 20 rekordów, maksymalny 100. Opóźnienie musi wynosić co najmniej dwie sekundy. Program czyta jedną publiczną stronę HTML, bez logowania, API, proxy, stron szczegółów i przechodzenia do kolejnych stron wyników. Uwzględnia robots.txt; odpowiedź 403/429 zatrzymuje pobieranie. Parametr `--html` pozwala odczytać zapisany HTML bez sieci, a `--output` i `--audit` zmienić nazwy lokalnych plików.
+
+Parser czyta dane ofert osadzone w HTML jako `__PRERENDERED_STATE__`, bez wykonywania JavaScriptu. Sprawdza kategorię sprzedaży, Warszawę, cenę całkowitą w PLN, metraż i pokoje. Pojedyncze niepoprawne rekordy pomija; brak poprawnych ofert kończy się błędem. OLX zapisuje `four` jako **„4 i więcej”**, więc parser zachowuje tylko pewne liczby: 1, 2 i 3 pokoje. Oferty 4+ pomija, co przesuwa próbkę w stronę mieszkań z mniejszą liczbą pokoi. Nie odgadujemy dokładnej liczby z opisu ani przy pomocy LLM. Linków do Otodom nie odwiedza.
+
+To próbka, więc nie opisuje całego katalogu Warszawy. Brak ogłoszenia w próbce nie oznacza sprzedaży ani niedostępności. Warunki wykorzystania danych do treningu modelu nadal wymagają ustalenia. Szczegóły opisują [źródło OLX](docs/SOURCE_OLX.md) i [instrukcja OLX i Otodom](docs/OLX_OTODOM.md).
+
+### Podgląd Otodom
+
+Analogicznie uruchom osobny podgląd jednej strony z mieszkaniami na sprzedaż w Warszawie:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.fetch_otodom --max-listings 20 --delay 2
+# Przykład bez sieci, na fikcyjnych ofertach z testów:
+.\.venv\Scripts\python.exe -m src.fetch_otodom --html tests/fixtures/otodom_search.html --output data/otodom_offline_preview.csv --audit data/otodom_offline_audit.json
+```
+
+Otwórz `data/otodom_preview.csv` i raport `data/otodom_preview_audit.json`. Parser odczytuje JSON `__NEXT_DATA__` osadzony w publicznym HTML. Sprawdza, czy strona i konkretne oferty dotyczą sprzedaży mieszkań w Warszawie. Cena całkowita w PLN, metraż oraz dokładna liczba pokoi są wymagane. Cena i metraż muszą być liczbami w źródle, bez odgadywania wartości z tekstu. Karty inwestycji i oferty z ukrytą ceną pomija. Nie odtwarza metrażu z ceny za metr ani brakujących cech z opisów.
+
+Pierwsze pobranie na żywo 7 października 2026 zapisało 18 unikalnych ofert. W osobnym odczycie wcześniejszego HTML porównaliśmy ceny, metraż i liczbę pokoi 17 mieszkań z widocznymi kartami — wszystkie dane się zgadzały. Parser pomija także reklamowe kopie HPR, aby nie traktować innej prezentacji tego samego ogłoszenia jako nowego mieszkania.
+
+Obsługiwane wartości pokoi to `ONE`, `TWO`, `THREE` i `FOUR`, czyli dokładnie 1–4. Otodomowe `FOUR` sprawdziliśmy na karcie opisanej jako „4 pokoje”. Nieznane wartości są pomijane. Piętro od parteru do dziesiątego zachowujemy jako liczbę; „powyżej dziesiątego” i poddasze pozostają puste. W tym formacie nie zapisujemy współrzędnych, odległości ani roku budowy. Granice Warszawy obecne w danych strony nie są lokalizacją konkretnego mieszkania.
+
+Także tutaj limit wynosi domyślnie 20 rekordów, maksymalnie 100, a opóźnienie co najmniej dwie sekundy. Nie potrzebujesz konta, API, `.env` ani Supabase. Program nie wykonuje JavaScriptu, nie korzysta z proxy i nie pobiera stron szczegółów ani kolejnych stron wyników. Sprawdza robots.txt i zatrzymuje się na 403/429. To lokalny CSV i raport, bez zapisu do bazy, modelu czy harmonogramu.
+
+Próbka Otodom również nie jest pełnym katalogiem i nie pozwala uznać zniknięcia oferty za sprzedaż. robots.txt zawiera `search=yes, ai-input=no, ai-train=no`; nie ustaliliśmy uprawnień do treningu modelu na tych ofertach. Dokładny zakres parsera opisuje [źródło Otodom](docs/SOURCE_OTODOM.md). Powyższe polecenia są nadal podglądami jednej strony. Nowe pobieranie wielu stron uruchomisz osobnym poleceniem poniżej.
+
+## 8. Codzienne obserwacje OLX i Otodom
+
+Najpierw uruchom lokalnie bez zapisu do bazy:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.daily_listings
+```
+
+Otwórz `data/daily_listings.csv` i `data/daily_collection_audit.json`. Domyślnie program sprawdza do pięciu publicznych stron każdego portalu i zapisuje do 500 poprawnych rekordów na źródło. To Warszawa i sprzedaż mieszkań, a nie cały serwis. OLX ogranicza także samo wyszukiwanie; domyślna kolejność ofert nie jest potwierdzona jako kolejność nowych publikacji. Raport pokazuje zakres pobrania i przerwane źródła.
+
+Po sprawdzeniu próbki i konfiguracji swojego `.env` możesz dopisać historię do Supabase:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.daily_listings --save-db
+```
+
+„Nowa oferta” w raporcie to pierwszy zapis identyfikatora w naszej bazie. Stare ogłoszenie pierwszy raz zauważone dziś też jest dla nas nowe. Znane identyfikatory aktualizują ostatnią cenę i dostają kolejną obserwację; ich wcześniejsza historia pozostaje w bazie. Program nie oznacza brakujących ofert jako sprzedanych i nie uruchamia modelu. Duplikaty tego samego mieszkania pomiędzy portalami wymagają późniejszego rozwiązania.
+
+W GitHubie nowy workflow **Daily OLX and Otodom observations** najpierw uruchom ręcznie z `save_db` wyłączonym i obejrzyj pliki w **Artifacts**. Po dodaniu sekretu `DATABASE_URL` sprawdź ręczny zapis. Następnie zmienna `PORTAL_COLLECTION_ENABLED=true` pozwoli wykonywać kolekcję codziennie około **06:15 czasu Warszawy**, również przy wyłączonym komputerze. Harmonogram jest przygotowany w kodzie; nie został jeszcze aktywowany. Stare `PIPELINE_ENABLED` pozostaw wyłączone.
+
+Dokładne kroki, ustawienia limitów, znaczenie liczników i ograniczenia znajdziesz w [instrukcji codziennego pobierania](docs/DAILY_COLLECTION.md). Warunki korzystania ze źródeł oraz treningu nadal wymagają ustalenia; ten harmonogram zbiera wyłącznie obserwacje.

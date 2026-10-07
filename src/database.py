@@ -179,7 +179,7 @@ def _normalize_listing(row: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _upsert_normalized(connection, normalized: list[dict[str, Any]]) -> int:
+def _upsert_normalized(connection, normalized: list[dict[str, Any]], *, statistics=None) -> int:
     """Save validated prices using the caller's transaction."""
     inserts = {"postgresql": postgres_insert, "sqlite": sqlite_insert}
     try:
@@ -202,6 +202,15 @@ def _upsert_normalized(connection, normalized: list[dict[str, Any]]) -> int:
         current["first_seen_at"] = row["observed_at"]
         current["last_seen_at"] = row["observed_at"]
         current_insert = dialect_insert(listings).values(**current)
+        if statistics is not None:
+            # Count actual inserts, including concurrent source/ID conflicts.
+            # A history insert alone does not mean a newly discovered listing.
+            created = connection.execute(current_insert.on_conflict_do_nothing(
+                index_elements=["source", "listing_id"]
+            ))
+            if created.rowcount == 1:
+                statistics["new_listings"] += 1
+                continue
         incoming = current_insert.excluded
         is_latest = incoming.last_seen_at >= listings.c.last_seen_at
         updates = {
@@ -235,6 +244,27 @@ def upsert_listings(engine: Engine, rows: list[dict[str, Any]]) -> int:
     normalized = [_normalize_listing(row) for row in rows]
     with engine.begin() as connection:
         return _upsert_normalized(connection, normalized)
+
+
+def upsert_listings_report(engine: Engine, rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Save one unique batch and distinguish discovery from price observations.
+
+    Statistics and both price tables share a transaction. A replay with the
+    same source/ID/time inserts nothing; absence never changes availability.
+    """
+    normalized = [_normalize_listing(row) for row in rows]
+    identities = {(row["source"], row["listing_id"]) for row in normalized}
+    if len(identities) != len(normalized):
+        raise ValueError("Raport pobrania wymaga jednej obserwacji na źródło i ID.")
+    statistics = {"seen_listings": len(normalized), "new_listings": 0,
+                  "existing_listings": 0, "observations_inserted": 0}
+    if normalized:
+        with engine.begin() as connection:
+            statistics["observations_inserted"] = _upsert_normalized(
+                connection, normalized, statistics=statistics
+            )
+    statistics["existing_listings"] = len(normalized) - statistics["new_listings"]
+    return statistics
 
 
 def _read_table(engine: Engine, table: Table, timestamps: tuple[str, ...]) -> pd.DataFrame:

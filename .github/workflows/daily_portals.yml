@@ -1,0 +1,141 @@
+name: Daily OLX and Otodom observations
+
+on:
+  workflow_dispatch:
+    inputs:
+      save_db:
+        description: Save validated price observations to the configured database
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    - cron: '15 6 * * *'
+      timezone: Europe/Warsaw
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && vars.PORTAL_COLLECTION_ENABLED == 'true'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: portal_test
+          POSTGRES_PASSWORD: local_test_only
+          POSTGRES_DB: portal_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U portal_test -d portal_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg2://portal_test:local_test_only@localhost:5432/portal_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pytest -q
+
+  collect:
+    needs: test
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && vars.PORTAL_COLLECTION_ENABLED == 'true'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: daily-portal-collection
+      cancel-in-progress: false
+    env:
+      SAVE_TO_DB: ${{ github.event_name == 'schedule' || inputs.save_db }}
+      DATABASE_URL: ${{ (github.event_name == 'schedule' || inputs.save_db) && secrets.DATABASE_URL || '' }}
+      OLX_MAX_PAGES: ${{ vars.OLX_MAX_PAGES || '5' }}
+      OTODOM_MAX_PAGES: ${{ vars.OTODOM_MAX_PAGES || '5' }}
+      PORTAL_MAX_LISTINGS: ${{ vars.PORTAL_MAX_LISTINGS || '500' }}
+      REQUEST_DELAY_SECONDS: ${{ vars.REQUEST_DELAY_SECONDS || '2' }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Validate database configuration when requested
+        run: |
+          python - <<'PY'
+          import os
+          if os.environ['SAVE_TO_DB'] == 'true' and not os.environ.get('DATABASE_URL'):
+              raise SystemExit('Add the DATABASE_URL repository secret before enabling database writes.')
+          PY
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Collect bounded Warsaw apartment-sale observations
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          import sys
+          command = [sys.executable, '-m', 'src.daily_listings']
+          if os.environ['SAVE_TO_DB'] == 'true':
+              command.append('--save-db')
+          raise SystemExit(subprocess.call(command))
+          PY
+      - name: Summarize collection audit
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          report = Path('data/daily_collection_audit.json')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write('## Bounded Warsaw apartment-sale collection\n\n')
+              summary.write('New means first observed by this database, not newly published. No market-wide completeness, availability or training is inferred.\n\n')
+              if not report.exists():
+                  summary.write('No audit file was produced; inspect the failed step.\n')
+              else:
+                  audit = json.loads(report.read_text(encoding='utf-8'))
+                  sources = audit.get('sources', {})
+                  entries = sources.items() if isinstance(sources, dict) else enumerate(sources) if isinstance(sources, list) else []
+                  for source, entry in entries:
+                      if not isinstance(entry, dict):
+                          continue
+                      label = str(entry.get('source', source))
+                      if label not in {'olx', 'otodom', 'www.olx.pl', 'www.otodom.pl'}:
+                          label = 'Source ' + str(source)
+                      summary.write('### ' + label + '\n\n')
+                      status = entry.get('status')
+                      if status in {'success', 'partial', 'failed', 'ok'}:
+                          summary.write('Status: ' + status + '\n\n')
+                      for section in (entry, entry.get('database_statistics', {}), entry.get('audit', {})):
+                          if not isinstance(section, dict):
+                              continue
+                          for key in ('pages_read', 'parsed_listings', 'exported_listings', 'new_listings', 'existing_listings', 'observations_inserted'):
+                              value = section.get(key)
+                              if type(value) is int and value >= 0:
+                                  summary.write('- ' + key + ': ' + str(value) + '\n')
+                      summary.write('\n')
+                  summary.write('Download the CSV and full audit artifact to inspect coverage and stop reasons.\n')
+          PY
+      - name: Upload observations and audit
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: portal-observations-${{ github.run_id }}
+          path: |
+            data/daily_listings.csv
+            data/daily_collection_audit.json
+          if-no-files-found: ignore
+          retention-days: 14
