@@ -214,3 +214,15 @@ W **Actions → Warsaw OLX and Otodom catalogue → Run workflow** wybierasz try
 [Pierwszy szeroki spis](https://github.com/filip-skopczynski/real-estate-mlops/actions/runs/37675646093) odczytał **14 850 ogłoszeń: 4399 z OLX i 10 451 z Otodom**. Potem rozszerzyliśmy parser Otodom o mieszkania wewnątrz kart inwestycji; [ponowny przegląd](https://github.com/filip-skopczynski/real-estate-mlops/actions/runs/37681124097) odczytał **20 153 ID Otodom**, zachowując również oferty bez ceny. [Codzienne zadanie z 8 października 2026](https://github.com/filip-skopczynski/real-estate-mlops/actions/runs/37727995096) zakończyło się poprawnie i odkryło **45 kolejnych ID: 14 OLX i 31 Otodom**. Odczytane dane sprawdziliśmy w Supabase. To spis rozpoznanych ogłoszeń; pełne pokrycie Warszawy pozostaje ograniczone przez źródła i zmieniające się wyniki.
 
 Dokładne kroki, ustawienia `CATALOG_*`, znaczenie postępu i ograniczenia znajdziesz w [instrukcji codziennego pobierania](docs/DAILY_COLLECTION.md). Dawne `src.daily_listings` i jego ustawienia pięciu stron pozostają osobnym testem próbki. Warunki korzystania ze źródeł oraz treningu nadal wymagają ustalenia; harmonogram zbiera spis i obserwacje.
+
+## 9. Sprawdź jakość i podobne ogłoszenia
+
+Na lokalnym eksporcie całego katalogu uruchom:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.quality --input data/catalog_latest.csv --output-dir data/quality
+```
+
+Zacznij od `data/quality/quality_report.md`. W `annotated_catalog.csv` zobaczysz wszystkie wiersze z dopisanymi oznaczeniami jakości, a w `duplicate_candidates.csv` pary podobnych ogłoszeń z różnych portali. Przekroczenie progów lub podobieństwo wymaga sprawdzenia; program zachowuje dane i nie scala par automatycznie. Ten etap działa lokalnie, bez zmian w bazie, harmonogramie i modelu. Zasady oraz sposób interpretacji wyników opisuje [instrukcja kontroli jakości danych](docs/DATA_QUALITY.md).
+
+Na eksporcie z 8 października audyt zachował wszystkie **24 606 wierszy**: **22 470** przeszło reguły, **2004** ma braki, a **132** wymaga sprawdzenia. W osobnym CSV jest **5201 możliwych par OLX–Otodom** do weryfikacji. To podobieństwa, nie potwierdzone duplikaty. Kolejnym krokiem jest sprawdzenie oznaczonych ofert i uzupełnianie cech oraz historii; sam status `pass` nie wystarcza do oceny modelu.

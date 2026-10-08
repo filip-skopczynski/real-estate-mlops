@@ -270,6 +270,16 @@ Limitations: asking prices differ from completed transaction prices; missing pro
 
 ## Exploration and tests
 
+Audit the local catalogue export and find similar cross-portal listing pairs:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.quality --input data/catalog_latest.csv --output-dir data/quality
+```
+
+This preserves the input and annotates every row in a separate CSV, writes quality reports and exports duplicate candidates for manual review. Fixed review thresholds are heuristics; candidates are not automatically merged or deleted. The command makes no database, collection, schedule or model changes. See the Polish [data quality walkthrough](docs/DATA_QUALITY.md) for the rules, comparison limits and known gaps.
+
+The **2026-10-08** catalogue audit retained all **24,606** rows: **22,470** passed these rules, **2004** had incomplete price/area/room information, and **132** needed review. Matching produced **5201 possible cross-portal pairs** without exhausting its budgets. These are unverified similarities, and passing the audit does not establish training readiness or property identity. All build years and most coordinates remain missing.
+
 Open `notebooks/01_eda.ipynb` in VS Code and select the project's Python environment. Its price/feature analysis uses the training partition, preserving the holdouts. See [KROK_PO_KROKU.md](KROK_PO_KROKU.md) for a Polish walkthrough.
 
 ```powershell
