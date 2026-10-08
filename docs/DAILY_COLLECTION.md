@@ -2,7 +2,25 @@
 
 Zbieramy publiczne ogłoszenia **sprzedaży mieszkań w Warszawie** z OLX i Otodom. Pierwsze uruchomienie buduje możliwie szeroki spis. Następne codzienne uruchomienia odkrywają ogłoszenia i stopniowo sprawdzają dalsze wyniki. Okresowy szerszy przegląd odświeża także ceny starszych ofert. Postęp zapisujemy w PostgreSQL, aby przerwany przegląd mógł zostać wznowiony w następnym przebiegu.
 
-Poprzedni, ograniczony przepływ z pięcioma stronami każdego portalu został włączony **7 października 2026 o 06:15 czasu Warszawy**. Przed aktywacją [ręczne uruchomienie na GitHubie](https://github.com/filip-skopczynski/real-estate-mlops/actions/runs/37640796024) zapisało **355 obserwacji: 218 z OLX i 137 z Otodom**. Odczyt z Supabase potwierdził zgodność cen, metraży, pokoi i linków. Ten wynik opisuje wcześniejszą próbkę; nie jest wynikiem pełnego pobrania startowego.
+**Stan na 8 października 2026:** Supabase przechowuje **24 606 rozpoznanych par źródło–ID: 4413 OLX i 20 193 Otodom**. Pobranie startowe, poprawiony przegląd Otodom i pierwsze codzienne zadanie zostały sprawdzone przez odczyt bazy. To liczby ogłoszeń rozróżnianych według portalu i identyfikatora. To samo mieszkanie może mieć kilka ogłoszeń; spis nie potwierdza pełnego pokrycia rynku ani dzisiejszej dostępności każdego wpisu.
+
+## Zweryfikowane wyniki — stan na 8 października 2026
+
+| Przebieg | ID OLX odczytane w przebiegu | ID Otodom odczytane w przebiegu | Łącznie |
+| --- | --- | --- | --- |
+| [Pierwszy bootstrap](https://github.com/filip-skopczynski/real-estate-mlops/actions/runs/37675646093) | 4399 | 10 451 | 14 850 |
+| [Poprawiony refresh Otodom](https://github.com/filip-skopczynski/real-estate-mlops/actions/runs/37681124097) | Nie pobierano | 20 153 | 20 153 |
+| [Codzienne zadanie 8 października](https://github.com/filip-skopczynski/real-estate-mlops/actions/runs/37727995096) | 1638 | 1075 | 2713 |
+
+Pierwszy bootstrap poprzedzał obsługę mieszkań z `relatedAds` w kartach inwestycji Otodom. Poprawiony `refresh` zakończył przejście **565 stron przy 577 żądaniach**, odkrył **9711 dodatkowych ID** i zwiększył zapisany katalog Otodom do **20 162 ID**. Zachował **1260 ogłoszeń bez ceny**, bez tworzenia wymyślonych wartości.
+
+Odczyt kontrolny potwierdził obecność wszystkich **20 153 ID** z tego refreshu. Ostatnie pola katalogowe **19 109** wpisów zgadzały się z pobraniem; pozostałe **1044 ID** miały już nowszy odczyt z następnego codziennego zadania. Wszystkie **18 893 rekordy z ceną i metrażem** w CSV refreshu miały dokładnie zgodne pola w historii cen. Nowsza obserwacja nie usuwa poprzedniej historii.
+
+Codzienne zadanie z 8 października zakończyło się poprawnie w trybie `daily`: OLX odczytał **55 stron / 57 żądań**, a Otodom **60 stron / 62 żądania**. Odkryło **45 ID nowych dla bazy: 14 OLX i 31 Otodom**. Wszystkie **2657 rekordów z ceną** w CSV tego przebiegu sprawdziliśmy przez odczyt bazy. Harmonogram celuje w 06:15 Warszawy; ten przebieg zaczął się około 06:35, co pokazuje możliwe opóźnienie GitHuba.
+
+Po tym zadaniu stan katalogu wynosi **24 606 ID**. Brak ceny dotyczy **1260 wpisów**, wszystkich z Otodom; braków metrażu jest **0**. Dokładna liczba pokoi pozostaje nieznana dla **753 wpisów: 640 OLX i 113 Otodom**. Zachowujemy te braki zgodnie ze źródłem. Żaden z tych przebiegów nie uruchamiał treningu modelu.
+
+Wcześniejsza [próba pięciu stron](https://github.com/filip-skopczynski/real-estate-mlops/actions/runs/37640796024) zapisała 355 obserwacji: 218 OLX i 137 Otodom. To historyczny test pierwszego przepływu, a nie obecny rozmiar spisu.
 
 ## Dlaczego pięć stron nie wystarczało
 
@@ -36,6 +54,10 @@ W katalogu głównym projektu, w terminalu VS Code:
 
 Wyniki zapisują się w ignorowanych przez Git plikach `data/catalog.csv` i `data/catalog_audit.json`. Parametry `--output` i `--report` pozwalają wybrać inne pliki. `--source olx` albo `--source otodom` uruchamia pojedyncze źródło; domyślne `both` obejmuje obydwa.
 
+`catalog.csv` zawiera unikalne pary źródło–ID faktycznie odczytane podczas danego przebiegu. Przebieg tylko Otodom nie zawiera danych OLX. Pełny zapisany katalog znajduje się w tabeli `listing_catalog`; może obejmować także identyfikatory, których nie spotkaliśmy w ostatnim odświeżeniu. Ostatni znany stan i czas odczytu nie potwierdzają bieżącej dostępności mieszkania.
+
+W lokalnym wdrożeniu przygotowaliśmy osobny odczyt całej tabeli jako `data/catalog_latest.csv` i raport `data/catalog_latest.json`. Eksport z **8 października 2026** obejmuje **24 606 ID**; wszystkie wyeksportowane wiersze sprawdziliśmy ponownie względem bazy. Zachowuje rzeczywisty ostatni czas obserwacji każdej pary źródło–ID. Raport opisuje zakres i stan przeglądów. Te pliki przygotowuje jednorazowe lokalne narzędzie; są ignorowane przez Git i nie są automatycznymi wynikami polecenia `src.catalog_pipeline`. Kolejne pobranie odnawia swój `catalog.csv`, nie ten osobny eksport.
+
 Bez `--save-db` program nie zapisuje trwałego punktu wznowienia. Jest to lokalna próba, której zakres zależy od ustawionego budżetu. Zapis do Supabase wymaga `DATABASE_URL` w prywatnym `.env` lub zmiennej środowiska. Nie wpisuj pełnego adresu z hasłem do kodu, dokumentacji ani zwykłych Variables na GitHubie.
 
 Domyślne limity na pojedyncze źródło:
@@ -59,7 +81,7 @@ Tabela `collection_progress` zachowuje punkt wznowienia i stan ukończenia dla �
 
 Istniejące `listings` i `listing_observations` obejmują rekordy ze zweryfikowaną ceną całkowitą w PLN i metrażem; liczba pokoi może pozostawać pusta. Rekord z brakującymi cechami jest użyteczny w spisie, ale wymaga dalszej oceny przed wykorzystaniem w modelu. Pipeline nie uruchamia treningu ani nie wycenia mieszkań.
 
-**„Nowa oferta” oznacza identyfikator po raz pierwszy zapisany w naszej bazie.** Ogłoszenie opublikowane miesiąc temu może dziś zostać przez nas odkryte. To nie dowód nowej publikacji ani nowego mieszkania na rynku. Zmiana ceny znanego ID tworzy obserwację i zachowuje historię. Czas obserwacji jest rzeczywistym czasem pobrania, a data publikacji stanowi osobne pole. Jedno mieszkanie zamieszczone na obu portalach może mieć dwa ID; łączenie takich nieruchomości wymaga osobnego etapu.
+**„Nowa oferta” oznacza identyfikator po raz pierwszy zapisany w naszej bazie.** Ogłoszenie opublikowane miesiąc temu może dziś zostać przez nas odkryte. To nie dowód nowej publikacji ani nowego mieszkania na rynku. Zmiana ceny znanego ID tworzy obserwację i zachowuje historię. Czas obserwacji jest rzeczywistym czasem pobrania; daty pierwszej publikacji nie potwierdziliśmy w obu formatach, więc jej osobne pole pozostaje puste. Jedno mieszkanie zamieszczone na obu portalach może mieć dwa ID; łączenie takich nieruchomości wymaga osobnego etapu.
 
 Cena z wcześniejszego pobrania zachowuje swój wcześniejszy czas. Dzisiejsze odkrywanie nowych ofert nie oznacza, że sprawdziliśmy dziś cenę każdego starego ogłoszenia. Szerszy `refresh` aktualizuje tę część danych, którą rzeczywiście ponownie odczyta.
 
