@@ -266,6 +266,16 @@ Temporal evaluation keeps whole UTC days separate, approximately 60% training, 2
 
 For prediction `P` and asking price `A`, the discrepancy is `(P - A) / P`. A prediction of 1,000,000 PLN and asking price of 850,000 PLN yields 15%. The candidate CSV marks whether a listing was seen during training; discrepancies on training listings can be optimistic.
 
+Print model-ranked candidates and their original listing links:
+
+```powershell
+python best_offers.py --top 5
+# Show only the first eligible candidate:
+python best_offers.py --top 1
+```
+
+The launcher reads `data/deals.csv`, recomputes the model price gap and screens quality, provenance, links and observation age. It excludes training listings and ambiguous latest records. On **2026-10-15**, no real trained model or candidate CSV has been generated yet; the launcher reports that missing prerequisite instead of inventing a ranking. It does not train a model or fetch listings. See the Polish [best-offer viewer guide](docs/BEST_OFFERS.md) for input fields and filters.
+
 Limitations: asking prices differ from completed transaction prices; missing property quality/features can explain apparent discounts. Listing-ID deduplication does not match the same property republished under another ID or on another portal. Availability describes the last successful complete capture, not changes since then; generic sources without status tracking cannot retire disappeared apartments. Temporal evaluation needs more than the minimum three days and 30 listings for a credible market conclusion. The verified source covers only one primary-market development. There is no drift monitoring, automatic model promotion or transactional artifact registry yet.
 
 ## Exploration and tests

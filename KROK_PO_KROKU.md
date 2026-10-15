@@ -226,3 +226,15 @@ Na lokalnym eksporcie całego katalogu uruchom:
 Zacznij od `data/quality/quality_report.md`. W `annotated_catalog.csv` zobaczysz wszystkie wiersze z dopisanymi oznaczeniami jakości, a w `duplicate_candidates.csv` pary podobnych ogłoszeń z różnych portali. Przekroczenie progów lub podobieństwo wymaga sprawdzenia; program zachowuje dane i nie scala par automatycznie. Ten etap działa lokalnie, bez zmian w bazie, harmonogramie i modelu. Zasady oraz sposób interpretacji wyników opisuje [instrukcja kontroli jakości danych](docs/DATA_QUALITY.md).
 
 Na eksporcie z 8 października audyt zachował wszystkie **24 606 wierszy**: **22 470** przeszło reguły, **2004** ma braki, a **132** wymaga sprawdzenia. W osobnym CSV jest **5201 możliwych par OLX–Otodom** do weryfikacji. To podobieństwa, nie potwierdzone duplikaty. Kolejnym krokiem jest sprawdzenie oznaczonych ofert i uzupełnianie cech oraz historii; sam status `pass` nie wystarcza do oceny modelu.
+
+## 10. Wyświetl oferty z rankingu i ich linki
+
+Otwórz `best_offers.py` w głównym folderze projektu i wybierz Run w VS Code, korzystając ze środowiska Python projektu. W terminalu możesz uruchomić:
+
+```powershell
+python best_offers.py --top 5
+```
+
+`--top 1` wyświetla tylko pierwszy wynik. Program czyta przyszły `data/deals.csv` i pokazuje cenę, predykcję, różnicę procentową oraz link. Wybiera świeże rekordy przechodzące audyt jakości, z jawną informacją o pochodzeniu predykcji; wyklucza dane treningowe i niejednoznaczne najnowsze rekordy.
+
+Na **15 października 2026** rzeczywisty model i jego ranking nie są jeszcze wygenerowane. Wtedy program podaje czytelny komunikat o brakującym pliku, bez wymyślania ofert. Przygotowanie i ocena modelu pozostają osobnym etapem. Szczegóły znajdziesz w [instrukcji wyświetlania ofert](docs/BEST_OFFERS.md).
