@@ -4,7 +4,7 @@ Ten etap pomaga sprawdzić zebrany katalog przed dalszą analizą. Program zacho
 
 ## Wynik na eksporcie z 8 października 2026
 
-Audyt objął **24 606 wierszy** z `catalog_latest.csv`. Wszystkie pary źródło–ID są unikalne; w tym eksporcie nie ma powtórzeń tego klucza.
+Audyt objął **24 606 wierszy** z ówczesnego `catalog_latest.csv`. Wszystkie pary źródło–ID były unikalne; w tym eksporcie nie było powtórzeń tego klucza. Historyczny eksport i raporty zachowujemy w `data/archive/2026-10-08-quality-snapshot`. Poniższe liczby dotyczą tego archiwum, a nie później odnowionego pliku katalogu.
 
 | Wynik reguł | Wiersze |
 | --- | ---: |
@@ -22,6 +22,8 @@ Raport lokalny zapisuje sumę SHA-256 wejścia, zastosowane progi i czas audytu,
 
 ## Uruchomienie
 
+Po utworzeniu modelu odnowiliśmy także audyt katalogu ze snapshotu **15 października**. Sprawdzenie wykonane **16 października czasu Warszawy** zachowało wszystkie **27 470 wierszy**: **25 137** przeszło reguły liczbowe, **2180** miało braki, a **153** wymagało przeglądu. Wskazano **6315 możliwych par między portalami**, bez potwierdzania tożsamości mieszkań. Te wyniki są w aktualnym `data/quality`; wcześniejszy audyt z 8 października pozostaje w archiwum. Reguły liczbowe nie rozpoznają praw do nieruchomości; dodatkowy filtr URL w wyświetlaczu ofert opisuje [instrukcja rankingu](BEST_OFFERS.md).
+
 W terminalu otwartym w głównym folderze projektu wykonaj:
 
 ```powershell
@@ -36,7 +38,7 @@ python -m src.quality --input data/catalog_latest.csv --output-dir data/quality
 
 Wejściem jest lokalny CSV. Nie potrzebujesz `.env` ani połączenia z Supabase. To polecenie nie pobiera ofert z internetu, nie zapisuje zmian w bazie, nie zmienia harmonogramu i nie trenuje modelu.
 
-`data/catalog_latest.csv` to wcześniej przygotowany eksport całej tabeli katalogu. Nazwa pliku nie gwarantuje aktualności: sam raport jakości nie odświeża eksportu. Sprawdź jego opis w `data/catalog_latest.json` oraz rzeczywiste czasy `observed_at`. Starszy czas oznacza wcześniejsze sprawdzenie ogłoszenia; zapisany rekord nie potwierdza dzisiejszej dostępności.
+`data/catalog_latest.csv` to zapis ostatniego stanu katalogu. Nazwa pliku nie gwarantuje aktualności: sam raport jakości nie odświeża eksportu. `src.build_deals` zapisuje opis swojego odczytu zgodnie pod nazwami `data/catalog_snapshot.json` i `data/catalog_latest.json`, a przygotowanie modelu opisuje w `data/build_deals_report.json`. Zawsze sprawdzaj rzeczywiste czasy `observed_at`. Starszy czas oznacza wcześniejsze sprawdzenie ogłoszenia; zapisany rekord nie potwierdza dzisiejszej dostępności. Wyniki audytu z 8 października na początku tej instrukcji dotyczą tamtego eksportu w archiwum, a nie później odnowionego CSV.
 
 ## Co powstaje
 
@@ -57,7 +59,7 @@ Brak ceny, metrażu lub dokładnej liczby pokoi oznacza niekompletny rekord. Sam
 
 Osobnego sprawdzenia wymagają m.in. wartości niedające się odczytać jako poprawne liczby, wartości niedodatnie, nieprawidłowy czas obserwacji, powtórzona para `source`–`listing_id` oraz wartości wykraczające poza progi kontrolne. Flagi mogą współistnieć: rekord może mieć jednocześnie brakującą cenę i inną wartość wymagającą sprawdzenia.
 
-`quality_flags` wyjaśnia wykryte problemy, a `quality_status` zbiera wynik kontroli w jednym polu. Przejście tych reguł oznacza tylko przejście tego audytu. Nie potwierdza prawdziwości oferty, dostępności mieszkania ani gotowości rekordu do treningu.
+`quality_flags` wyjaśnia wykryte problemy, a `quality_status` zbiera wynik kontroli w jednym polu. Przejście tych reguł oznacza tylko przejście tego audytu. Nie potwierdza prawdziwości oferty, dostępności mieszkania, tytułu prawnego ani gotowości rekordu do treningu. Osobny filtr wskaźników udziałów i partycypacji w adresach ofert działa przy wyborze kandydatów; opisuje go [instrukcja rankingu](BEST_OFFERS.md#sygnały-udziałów-i-partycypacji-w-adresach-ofert). Nie usuwa takich danych z historii ani nie koryguje ocenionego wcześniej modelu.
 
 | `quality_status` | Znaczenie |
 | --- | --- |
@@ -90,7 +92,7 @@ Niepoprawne podane liczby w polach opcjonalnych, np. `floor`, `build_year`, `roo
 | Metraż | 10–500 m² | Czy odczytano powierzchnię mieszkania i właściwą jednostkę |
 | Cena za m² | 3000–50 000 PLN/m² | Czy cena całkowita oraz metraż opisują ten sam przedmiot sprzedaży |
 
-To stałe, umowne reguły przeglądu danych. Nie wyznaczają aktualnych cen rynkowych Warszawy, wartości mieszkania ani granic zbioru treningowego. Poprawna oferta może przekraczać te progi. Program ją oznacza i zachowuje, aby można było zweryfikować źródło oraz przyczynę odstępstwa.
+To stałe, umowne reguły przeglądu danych. Nie wyznaczają aktualnych cen rynkowych Warszawy ani wartości mieszkania. Poprawna oferta może przekraczać te progi. Sam audyt ją oznacza i zachowuje, aby można było zweryfikować źródło oraz przyczynę odstępstwa. Osobny eksperymentalny `src.build_deals` wybiera obecnie do modelu rekordy `pass`, więc te reguły ograniczają jego próbkę. Nie traktujemy ich jako zweryfikowanych granic rynku; taki wybór danych trzeba uwzględniać przy interpretacji metryk.
 
 ## Jak szukamy podobnych ogłoszeń
 
@@ -126,4 +128,4 @@ Najpierw przeczytaj `quality_report.md`, potem obejrzyj oznaczone wiersze i przy
 
 Kolejny etap to zbieranie rzeczywistej historii, ręczna weryfikacja wybranych par i zaplanowanie podziału danych do oceny modelu. Ta heurystyka nie gwarantuje, że to samo mieszkanie nie znajdzie się po obu stronach podziału trening/test. Nie należy tworzyć grup do takiego podziału na podstawie podobieństwa ceny: wykorzystywałoby to przewidywany cel modelu. Potwierdzone niezależnie grupy nieruchomości oraz czas obserwacji trzeba uwzględnić osobno.
 
-Obecne `src.preprocess` i `src.train` działają na dotychczasowych zasadach. Raport jakości nie zmienia ich wejścia ani filtrów, a trening na danych z portali pozostaje wyłączony.
+Sam raport jakości nie zmienia wejścia ani filtrów `src.preprocess` i `src.train`. Osobny, ręcznie uruchamiany `src.build_deals` wykorzystuje audyt do przygotowania eksperymentalnego modelu na zapisanej historii OLX i Otodom. Najpierw wybiera najwcześniejsze surowe obserwacje źródło–ID, potem kontroluje ich jakość; nie zastępuje pierwszej niepoprawnej obserwacji późniejszą dobrą. Dla bieżących kandydatów korzysta z ostatniego katalogu, obejmującego też rekordy z brakami, bez sięgania po starszą cenę. Opis treningu, ograniczeń oceny oraz wyświetlania linków znajdziesz w [instrukcji eksperymentalnego rankingu](BEST_OFFERS.md). Codzienny harmonogram nadal zajmuje się zbieraniem danych, bez automatycznego treningu.

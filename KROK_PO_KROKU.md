@@ -22,13 +22,13 @@ py -3.12 -m venv .venv
 
 ```powershell
 .\.venv\Scripts\python.exe -m tests.demo_data
-.\.venv\Scripts\python.exe -m src.preprocess --input data/demo_observations.csv
-.\.venv\Scripts\python.exe -m src.train
+.\.venv\Scripts\python.exe -m src.preprocess --input data/demo_observations.csv --output data/demo/training.csv --latest-output data/demo/latest.csv
+.\.venv\Scripts\python.exe -m src.train --input data/demo/training.csv --latest data/demo/latest.csv --model-output models/demo/model.joblib --metrics-output models/demo/metrics.json --deals-output data/demo/deals.csv
 ```
 
-Pierwsza komenda tworzy fikcyjne oferty. Druga sprawdza dane i tworzy dwa pliki: najwcześniejsze obserwacje do nauki i najnowsze do szukania kandydatów. Trzecia uczy model, sprawdza jego błędy, zapisuje go oraz tworzy `data/deals.csv`.
+Pierwsza komenda tworzy fikcyjne oferty. Druga sprawdza dane i tworzy dwa pliki: najwcześniejsze obserwacje do nauki i najnowsze do szukania kandydatów. Trzecia uczy model, sprawdza jego błędy, zapisuje go oraz tworzy `data/demo/deals.csv`. Osobne foldery `data/demo` i `models/demo` chronią rzeczywisty eksperymentalny model oraz ranking przed zastąpieniem wynikami demonstracji.
 
-W `models/metrics.json` porównaj `xgboost.mae_pln` z `baseline_median.mae_pln`. MAE opisuje przeciętny błąd bezwzględny w złotych. Model porównujemy z prostym punktem odniesienia, żeby ustalić, czy uczenie wnosi coś użytecznego. Demo służy sprawdzeniu programu; nie ocenia rynku Warszawy.
+W `models/demo/metrics.json` porównaj `xgboost.mae_pln` z `baseline_median.mae_pln`. MAE opisuje przeciętny błąd bezwzględny w złotych. Model porównujemy z prostym punktem odniesienia, żeby ustalić, czy uczenie wnosi coś użytecznego. Demo służy sprawdzeniu programu; nie ocenia rynku Warszawy.
 
 ## 4. Poznaj pliki w kolejności przepływu danych
 
@@ -49,6 +49,8 @@ W `models/metrics.json` porównaj `xgboost.mae_pln` z `baseline_median.mae_pln`.
 | `src/availability.py` | Zapisuje pełny spis mieszkań, bieżące statusy i historię dostępności razem z cenami |
 | `src/preprocess.py` | Czyści dane, usuwa powtórzenia i przygotowuje CSV |
 | `src/train.py` | Rozdziela dane, uczy XGBoost, mierzy błędy i ocenia najnowsze oferty |
+| `src/build_deals.py` | Ręcznie buduje eksperymentalny model i ranking z odczytanej historii portali, bez zapisu do bazy |
+| `best_offers.py` | Wyświetla zapisanych kandydatów wraz z linkami do ogłoszeń |
 | `notebooks/01_eda.ipynb` | Pomaga zrozumieć rozkłady danych oraz brakujące wartości |
 | `.github/workflows/scraper_pipeline.yml` | Uruchamia testy i później codzienny przepływ na GitHub |
 | `.github/workflows/daily_portals.yml` | Codzienny spis OLX i Otodom oraz niedzielne odświeżanie; można też uruchomić pobranie startowe |
@@ -190,7 +192,7 @@ Otwórz `data/catalog.csv` i `data/catalog_audit.json`. Budżet początkowego sp
 
 CSV pokazuje ogłoszenia odczytane w tym konkretnym przebiegu. Wszystkie znane identyfikatory oraz ich ostatnio zapisane dane obejrzysz w Supabase w tabeli `listing_catalog`. Jeden przebieg odświeżający tylko Otodom nie zastępuje całego katalogu obu portali.
 
-Podczas tej konfiguracji przygotowaliśmy też lokalny `data/catalog_latest.csv` z odczytu całej tabeli oraz `data/catalog_latest.json` z opisem zakresu i postępu. Eksport z **8 października 2026** zawiera **24 606 par źródło–ID: 4413 OLX i 20 193 Otodom**; wszystkie wiersze sprawdziliśmy przez odczyt bazy. To osobny eksport przygotowany jednorazowym narzędziem: polecenie zbierania nie odnawia tych dwóch plików automatycznie. Czas `observed_at` w eksporcie oznacza ostatnie rzeczywiste sprawdzenie ogłoszenia, a nie czas utworzenia CSV. Dane są ignorowane przez Git. Zapisane ID nie oznaczają tylu różnych nieruchomości ani potwierdzonej dzisiejszej dostępności.
+Podczas tej konfiguracji przygotowaliśmy też lokalny `data/catalog_latest.csv` z odczytu całej tabeli oraz opis zakresu i postępu. Eksport z **8 października 2026** zawierał **24 606 par źródło–ID: 4413 OLX i 20 193 Otodom**; wszystkie wiersze sprawdziliśmy przez odczyt bazy. Ten eksport oraz raporty jakości zachowujemy w `data/archive/2026-10-08-quality-snapshot`. Polecenie zbierania nie odnawia lokalnego eksportu automatycznie. Nowy ręczny `src.build_deals`, opisany w punkcie 10, zapisuje własny `catalog_latest.csv` i aktualizuje razem dwa równoważne opisy: `catalog_snapshot.json` oraz `catalog_latest.json`. Czas `observed_at` oznacza ostatnie rzeczywiste sprawdzenie ogłoszenia, a nie czas utworzenia CSV. Dane są ignorowane przez Git. Zapisane ID nie oznaczają tylu różnych nieruchomości ani potwierdzonej dzisiejszej dostępności.
 
 Po sprawdzeniu konfiguracji `.env` możesz zapisać do Supabase spis, historię cen i postęp:
 
@@ -227,7 +229,31 @@ Zacznij od `data/quality/quality_report.md`. W `annotated_catalog.csv` zobaczysz
 
 Na eksporcie z 8 października audyt zachował wszystkie **24 606 wierszy**: **22 470** przeszło reguły, **2004** ma braki, a **132** wymaga sprawdzenia. W osobnym CSV jest **5201 możliwych par OLX–Otodom** do weryfikacji. To podobieństwa, nie potwierdzone duplikaty. Kolejnym krokiem jest sprawdzenie oznaczonych ofert i uzupełnianie cech oraz historii; sam status `pass` nie wystarcza do oceny modelu.
 
-## 10. Wyświetl oferty z rankingu i ich linki
+## 10. Przygotuj eksperymentalny model i ranking
+
+Na rzeczywistej historii mieszkań OLX i Otodom zapisanej w Supabase uruchom ręcznie:
+
+```powershell
+python -m src.build_deals
+```
+
+Program korzysta z `DATABASE_URL` w lokalnym `.env` i tylko odczytuje bazę. Nie pobiera ponownie stron portali, nie dopisuje danych do Supabase i nie zmienia harmonogramu. Zapisuje lokalny model, metryki, przewidywania i do 50 kandydatów w `data/deals.csv`; domyślny próg wynosi 15%, a wiek ostatniego odczytu najwyżej 7 dni.
+
+Do nauki wybiera najwcześniejszy surowy rekord źródło–ID przed kontrolą jakości. Do aktualnych kandydatów korzysta z ostatniego katalogu, także jego braków: nie zastępuje niepełnego nowego wpisu starszą ceną. Ocena używa podziału czasowego na trening, walidację i test. Ranking zawiera tylko test i nowe identyfikatory; pomija trening oraz walidację, która sterowała zatrzymaniem uczenia. Ten sam lokal na dwóch portalach nadal może mieć różne ID, dlatego model i jego ocena pozostają **eksperymentalne**.
+
+Tryb bez połączenia z bazą wymaga dwóch wcześniejszych eksportów. Wyniki można zapisać osobno:
+
+```powershell
+python -m src.build_deals --observations data/observations.csv --catalog data/catalog_latest.csv --data-dir data/experimental --models-dir models/experimental
+```
+
+Sprawdź `data/build_deals_report.json` oraz `models/metrics.json`. W trybie z osobnymi folderami znajdziesz je odpowiednio w `data/experimental` i `models/experimental`. Metryki porównują model z prostą prognozą mediany. Wynik nie potwierdza wartości transakcyjnej ani zysku z zakupu.
+
+Pierwszy rzeczywisty model powstał **15 października 2026** na odczycie **80 682 obserwacji cen** i **27 470 wpisów katalogu**. Do oceny weszło **25 142** poprawnych pierwszych obserwacji: **22 427** do nauki, **43** do walidacji i **2672** do testu. MAE na tym teście wyniosło **153 174,13 PLN**, a dla mediany cen treningowych **320 416,67 PLN**. Około 89% ofert kohorty pochodzi z pierwszego dnia; mała walidacja, niepotwierdzone duplikaty nieruchomości oraz niepełna klasyfikacja tytułu prawnego ograniczają wnioski. To eksperyment, a nie potwierdzona jakość wyceny całego rynku.
+
+Po ponownym wyborze **16 października czasu Warszawy** zapisaliśmy **50 kandydatów spośród 654 spełniających filtry**. Pięć ID pominięto ze względu na wskaźniki udziałów lub partycypacji w URL. Wykorzystaliśmy te same **24 065 zapisanych przewidywań**; model, metryki i odczyt źródłowy pozostają z 15 października. Wszystkie 50 przewidywań odtworzyliśmy po wczytaniu modelu, a ceny, odnośniki i czasy obserwacji porównaliśmy z katalogiem. Model nie był ponownie trenowany ani dostrajany do wyniku testu. To sprawdzenie obliczeń, nie potwierdzenie dostępności ani oszczędności.
+
+## 11. Wyświetl oferty z rankingu i ich linki
 
 Otwórz `best_offers.py` w głównym folderze projektu i wybierz Run w VS Code, korzystając ze środowiska Python projektu. W terminalu możesz uruchomić:
 
@@ -235,6 +261,8 @@ Otwórz `best_offers.py` w głównym folderze projektu i wybierz Run w VS Code, 
 python best_offers.py --top 5
 ```
 
-`--top 1` wyświetla tylko pierwszy wynik. Program czyta przyszły `data/deals.csv` i pokazuje cenę, predykcję, różnicę procentową oraz link. Wybiera świeże rekordy przechodzące audyt jakości, z jawną informacją o pochodzeniu predykcji; wyklucza dane treningowe i niejednoznaczne najnowsze rekordy.
+`--top 1` wyświetla tylko pierwszy wynik. Program czyta zapisany `data/deals.csv` i pokazuje cenę, przewidywaną cenę ofertową, różnicę procentową oraz link. Wybiera świeże rekordy przechodzące audyt jakości, z jawną informacją o pochodzeniu predykcji; wyklucza dane treningowe i niejednoznaczne najnowsze rekordy. Dla wyników zapisanych osobno dodaj `--input data/experimental/deals.csv`.
 
-Na **15 października 2026** rzeczywisty model i jego ranking nie są jeszcze wygenerowane. Wtedy program podaje czytelny komunikat o brakującym pliku, bez wymyślania ofert. Przygotowanie i ocena modelu pozostają osobnym etapem. Szczegóły znajdziesz w [instrukcji wyświetlania ofert](docs/BEST_OFFERS.md).
+Jeśli ranking nie został jeszcze wygenerowany, program podaje czytelny komunikat o brakującym pliku, bez wymyślania ofert. Sam wyświetlacz nie uruchamia treningu; służy do tego poprzedni krok. Różnica względem modelu nie oznacza potwierdzonej oszczędności. Szczegóły znajdziesz w [instrukcji modelu i wyświetlania ofert](docs/BEST_OFFERS.md).
+
+Kandydaci są dodatkowo pomijani, jeśli słowa w URL sugerują udział w mieszkaniu lub partycypację TBS. To ostrożne wskaźniki z adresu, nie potwierdzona klasyfikacja prawna oferty. Sam ranking nie odnawia się codziennie: harmonogram aktualizuje bazę, a model i lokalne wyniki budujemy oddzielnie. Wyświetlacz sprawdza świeżość zapisanych rekordów, bez pobierania aktualnych cen.

@@ -2,7 +2,9 @@
 
 A Python pipeline that collects apartment asking prices, preserves price and availability history in PostgreSQL, and trains an XGBoost regression model to rank available listings below its predicted asking price.
 
-**Current status, 2026-10-08:** Supabase holds **24,606 portal listing identities: 4413 OLX and 20,193 Otodom**, after initial traversal, an Otodom refresh covering grouped apartments and a successful scheduled daily update. Catalogue rows and price history were checked against the saved captures. Collection runs around **06:15 Europe/Warsaw**, with Sunday broad refresh and persistent checkpoints. These counts describe source/ID pairs; property deduplication and complete Warsaw coverage remain unresolved. The Bemovo pilot separately tracks verified prices and availability. Portal training and the older generic production/training job remain disabled; real Warsaw model quality has not yet been established. See the [verified collection results](docs/DAILY_COLLECTION.md#zweryfikowane-wyniki--stan-na-8-października-2026).
+**First experimental model, 2026-10-15:** A read-only Supabase snapshot contained **80,682 price observations and 27,470 portal catalogue identities**. Temporal XGBoost evaluation used 22,427 training, 43 validation and 2672 test listings. Test MAE was **153,174 PLN**, compared with **320,417 PLN** for the training-median baseline. This is an imbalanced, source/ID-level experiment; physical-property deduplication, complete Warsaw coverage and tenure classification remain unresolved. See the [model and ranking guide](docs/BEST_OFFERS.md).
+
+Collection runs around **06:15 Europe/Warsaw**, with Sunday broad refresh and persistent checkpoints. The Bemovo pilot separately tracks verified prices and availability. Model/ranking builds are manual; scheduled training and the older generic production/training job remain disabled. Historical capture counts are documented in the [verified collection results](docs/DAILY_COLLECTION.md#zweryfikowane-wyniki--stan-na-8-października-2026).
 
 ## Architecture
 
@@ -44,21 +46,21 @@ Activation is optional: calling the environment's Python directly also avoids Po
 
 ```powershell
 .\.venv\Scripts\python.exe -m tests.demo_data
-.\.venv\Scripts\python.exe -m src.preprocess --input data/demo_observations.csv
-.\.venv\Scripts\python.exe -m src.train
+.\.venv\Scripts\python.exe -m src.preprocess --input data/demo_observations.csv --output data/demo/training.csv --latest-output data/demo/latest.csv
+.\.venv\Scripts\python.exe -m src.train --input data/demo/training.csv --latest data/demo/latest.csv --model-output models/demo/model.joblib --metrics-output models/demo/metrics.json --deals-output data/demo/deals.csv
 ```
 
 This creates 200 fictional observations of 180 apartments over multiple days. It deliberately includes later price changes. Outputs:
 
 | File | Meaning |
 | --- | --- |
-| `data/training.csv` | Earliest valid observation for each listing |
-| `data/latest.csv` | Latest valid observation, excluding unavailable apartments where statuses are tracked |
-| `models/model.joblib` | Fitted preprocessor, model and metadata |
-| `models/metrics.json` | Validation/test metrics, baseline and split provenance |
-| `data/deals.csv` | Ranked candidates above the discrepancy threshold |
+| `data/demo/training.csv` | Earliest valid observation for each listing |
+| `data/demo/latest.csv` | Latest valid observation, excluding unavailable apartments where statuses are tracked |
+| `models/demo/model.joblib` | Fitted preprocessor, model and metadata |
+| `models/demo/metrics.json` | Validation/test metrics, baseline and split provenance |
+| `data/demo/deals.csv` | Demonstration candidates above the discrepancy threshold |
 
-The demonstration proves the software path works. Its scores are **not evidence of real Warsaw market performance**. Generated data/models are ignored by Git.
+The demonstration proves the software path works. Its scores are **not evidence of real Warsaw market performance**. Separate demo output folders preserve the actual experimental model and ranking. Generated data/models are ignored by Git.
 
 For a local database demonstration, run `python -m tests.demo_data --sqlite data/demo.db`, set `DATABASE_URL=sqlite:///data/demo.db` in a local `.env`, then run `python -m src.preprocess` without `--input`. SQLite is a test/demo backend; production uses PostgreSQL.
 
@@ -200,7 +202,7 @@ The catalogue runner separates initial discovery from daily checks and broader p
 
 Outputs are `data/catalog.csv` (unique source/IDs actually observed in that run) and `data/catalog_audit.json` (coverage, errors and checkpoints). Use `--source olx|otodom|both` to select portals. Sparse catalogue rows retain stable IDs/URLs when price, area or exact rooms are unknown; OLX's four-or-more group has no invented exact room count. Existing price tables receive rows only with verified positive total PLN price and area. Publication dates remain unknown for both portal formats. **New means first observed in this database.** Cross-portal apartment deduplication remains unresolved. A source failure retains validated captured rows and reports the unfinished work. Budget stops preserve a checkpoint and incomplete traversal. No availability snapshot, disappearance inference or model training is performed.
 
-A separate read-only database export prepared on **2026-10-08**, `data/catalog_latest.csv`, contains all **24,606** known source/ID pairs with their actual last-observed timestamps; `data/catalog_latest.json` describes its scope and traversal progress. Every exported row was checked against the database. This local, ignored export is produced by a one-off tool, and collection commands do not automatically refresh it. Its last-known records can include listings absent from the latest run; the export does not confirm present-day availability.
+A separate read-only database export prepared on **2026-10-08** contained **24,606** known source/ID pairs with their actual last-observed timestamps. Every exported row was checked against the database; that export and quality reports are preserved under `data/archive/2026-10-08-quality-snapshot`. Collection commands do not automatically refresh the local, ignored `data/catalog_latest.csv`. The opt-in `src.build_deals` command replaces it with its own source-restricted snapshot and updates both metadata aliases, `data/catalog_snapshot.json` and `data/catalog_latest.json`, together. Last-known records can include listings absent from the latest run and do not confirm present-day availability.
 
 The workflow `.github/workflows/daily_portals.yml`, named **Warsaw OLX and Otodom catalogue**, replaces the earlier five-page schedule enabled after this [manual capture and database write](https://github.com/filip-skopczynski/real-estate-mlops/actions/runs/37640796024). Its `DATABASE_URL` is an encrypted repository secret; `PORTAL_COLLECTION_ENABLED=true` enables scheduling. Manual runs select `bootstrap`, `daily` or `refresh` and `both`, `olx` or `otodom`; database writes default to false. Scheduled runs use both sources. A manual bootstrap with writes starts the initial traversal. For a separate deployment, first inspect a manual capture without writes, configure your own database secret, then verify storage before enabling the schedule. Captures/audits are artifacts for 14 days; tests use isolated PostgreSQL 16.
 
@@ -266,17 +268,24 @@ Temporal evaluation keeps whole UTC days separate, approximately 60% training, 2
 
 For prediction `P` and asking price `A`, the discrepancy is `(P - A) / P`. A prediction of 1,000,000 PLN and asking price of 850,000 PLN yields 15%. The candidate CSV marks whether a listing was seen during training; discrepancies on training listings can be optimistic.
 
-Print model-ranked candidates and their original listing links:
+Build an **experimental** asking-price model and candidate ranking from the existing OLX/Otodom Warsaw history, then print original listing links:
 
 ```powershell
+python -m src.build_deals
 python best_offers.py --top 5
 # Show only the first eligible candidate:
 python best_offers.py --top 1
 ```
 
-The launcher reads `data/deals.csv`, recomputes the model price gap and screens quality, provenance, links and observation age. It excludes training listings and ambiguous latest records. On **2026-10-15**, no real trained model or candidate CSV has been generated yet; the launcher reports that missing prerequisite instead of inventing a ranking. It does not train a model or fetch listings. See the Polish [best-offer viewer guide](docs/BEST_OFFERS.md) for input fields and filters.
+`src.build_deals` reads a consistent, source-restricted PostgreSQL snapshot without database writes or portal requests. It selects earliest raw source/ID observations before quality filtering, trains/evaluates a temporal XGBoost split and scores the authoritative latest sparse catalogue without falling back to older prices. Outputs include `data/scored_listings.csv`, `data/deals.csv`, `data/build_deals_report.json`, `models/model.joblib` and `models/metrics.json`. Defaults are 500 trees, up to 50 candidates, a 15% model-gap threshold and seven-day freshness. Offline use requires both `--observations CSV` and `--catalog CSV`; `--data-dir` and `--models-dir` select separate output folders. Collection schedules do not train the model.
 
-Limitations: asking prices differ from completed transaction prices; missing property quality/features can explain apparent discounts. Listing-ID deduplication does not match the same property republished under another ID or on another portal. Availability describes the last successful complete capture, not changes since then; generic sources without status tracking cannot retire disappeared apartments. Temporal evaluation needs more than the minimum three days and 30 listings for a credible market conclusion. The verified source covers only one primary-market development. There is no drift monitoring, automatic model promotion or transactional artifact registry yet.
+The launcher reads `data/deals.csv`, recomputes the model price gap and screens quality, provenance, links and observation age. This build exports only test/unseen listings, excluding training and validation because validation controlled early stopping. A missing ranking produces an explanatory message; displaying a ranking does not train or fetch data. These are experimental asking-price comparisons, not market values or validated savings. Physical-property deduplication across portals remains unresolved, and source/ID separation does not establish an independent property-level evaluation. See the Polish [model and best-offer guide](docs/BEST_OFFERS.md) for commands, outputs and limitations.
+
+The **2026-10-15** model used 25,142 quality-pass first-observation identities over nine UTC days, with a 22,427/43/2672 train/validation/test split. Its held-out test MAE was 153,174.13 PLN versus a median baseline of 320,416.67 PLN (XGBoost RMSE 266,205.54 PLN, R² 0.7765). About 89% of the cohort came from the first day and validation contained just 43 listings. Tenure was not fully classified in training; conservative candidate URL indicators for shares/TBS do not correct that limitation or establish legal rights. The original model and test scores remain frozen when only candidate filters change.
+
+The **2026-10-16 Warsaw-time** candidate re-filter reused all 24,065 saved predictions and the unchanged 2026-10-15 model/metrics. Five URL-indicated rights offers were excluded, leaving **654 eligible candidates**; the top **50** were saved to `data/deals.csv`. All 50 predictions were reproduced after reloading the model, and prices, URLs and observation timestamps matched the authoritative snapshot. Candidate rows contain only test/unseen partitions. This verifies saved calculations and provenance, not property identity, legal tenure, current availability or savings. The ranking does not refresh automatically with the daily collection job.
+
+Limitations: asking prices differ from completed transaction prices; missing property quality/features can explain apparent discounts. Listing-ID deduplication does not match the same property republished under another ID or on another portal. Availability describes the last successful complete capture, not changes since then; generic sources without status tracking cannot retire disappeared apartments. Temporal evaluation needs more than the minimum three days and 30 listings for a credible market conclusion. The Bemovo pilot covers one primary-market development; the portal experiment uses a broader, incomplete Warsaw catalogue. There is no drift monitoring, automatic model promotion or transactional artifact registry yet.
 
 ## Exploration and tests
 

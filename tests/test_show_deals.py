@@ -16,6 +16,11 @@ from src import show_deals
 NOW = datetime(2026, 10, 15, 12, tzinfo=timezone.utc)
 
 
+def test_experimental_ranking_status_is_visible_in_terminal_output():
+    selected, report = select(row(ranking_status="EXPERIMENTAL"))
+    assert "Ranking status: EXPERIMENTAL" in show_deals.format_deals(selected, report)
+
+
 @pytest.mark.parametrize("field,left,right", [
     ("floor", 1, 8), ("build_year", 2000, 2020),
     ("latitude", 52.1, 52.2), ("longitude", 21.0, 21.1),
@@ -345,3 +350,48 @@ def test_cli_zero_eligible_candidates_is_success_and_explains_empty_result(tmp_p
     assert show_deals.main(["--input", str(path)]) == 0
     message = capsys.readouterr().out
     assert message.strip() and row()["url"] not in message
+
+
+@pytest.mark.parametrize("source,slug,flag", [
+    ("www.olx.pl", "udzial-1-2-w-mieszkaniu", "partial_ownership_indicated"),
+    ("www.otodom.pl", "udzial-1-2-z-posiadaniem-w-kawalerce", "partial_ownership_indicated"),
+    ("www.otodom.pl", "sprzedaz-partycypacji-w-tbs", "housing_participation_indicated"),
+    ("www.olx.pl", "cesja-najmu-kawalerki", "housing_participation_indicated"),
+])
+def test_large_model_gap_for_partial_or_participation_rights_is_excluded_without_changing_prediction(source, slug, flag):
+    special_url = (f"https://www.olx.pl/d/oferta/{slug}-ID123.html" if source == "www.olx.pl"
+                   else f"https://www.otodom.pl/pl/oferta/{slug}-ID123")
+    special = row("1", source, url=special_url, price_pln=180_000, area_m2=21.1, rooms=1)
+    original = pd.DataFrame([special, row("2")])
+    before = original.copy(deep=True)
+    selected, report = show_deals.select_deals(original, now=NOW)
+    assert list(selected["listing_id"]) == ["2"]
+    assert report["eligible_listings"] == 1 and sum(report["excluded_counts"].values()) == 1
+    assert report["rights_filter"]["excluded_listings"] == 1
+    assert report["rights_filter"]["flag_counts"] == {flag: 1}
+    assert_frame_equal(original, before)
+    assert original.iloc[0]["predicted_price_pln"] == 1_000_000
+    text = show_deals.format_deals(selected, report)
+    assert special_url not in text and row("2")["url"] in text
+
+
+@pytest.mark.parametrize("slug", ["mieszkanie-z-udzialem-w-gruncie", "udzial-w-drodze",
+    "mieszkanie-z-udzialem-1-100-w-gruncie", "mieszkanie-z-udzialem-w-ogrodzie"])
+def test_normal_apartment_shared_land_road_or_garden_remains_eligible(slug):
+    ordinary = row(url=f"https://www.olx.pl/d/oferta/{slug}-ID123.html")
+    selected, report = select(ordinary)
+    assert len(selected) == report["eligible_listings"] == 1
+    assert selected.iloc[0]["discount"] == pytest.approx(0.2)
+    assert sum(report["excluded_counts"].values()) == 0
+    assert report["rights_filter"]["excluded_listings"] == 0
+    assert report["rights_filter"]["flag_counts"] == {}
+
+
+def test_rights_filter_counts_duplicate_latest_observations_as_one_excluded_identity():
+    special = row(url="https://www.olx.pl/d/oferta/udzial-1-2-w-mieszkaniu-tbs-ID123.html",
+        price_pln=180_000, area_m2=21.1, rooms=1)
+    selected, report = select(special, special)
+    assert selected.empty and report["unique_listings"] == 1
+    assert sum(report["excluded_counts"].values()) == report["rights_filter"]["excluded_listings"] == 1
+    assert report["rights_filter"]["flag_counts"] == {
+        "partial_ownership_indicated": 1, "housing_participation_indicated": 1}

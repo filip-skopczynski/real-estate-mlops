@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from src.quality import RESERVED, audit_catalog
+from src.listing_scope import rights_offer_flags
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT = PROJECT_ROOT / "data" / "deals.csv"
@@ -153,7 +154,7 @@ def select_deals(frame: pd.DataFrame, *, top=5, max_age_days=7,
         grouped[identity].append((position, stamp))
         if stamp is None:
             invalid_time.add(identity)
-    excluded, latest = Counter(), {}
+    excluded, rights_flags, latest = Counter(), Counter(), {}
     older_rows = 0
     for identity in sorted(grouped):
         history = grouped[identity]
@@ -203,6 +204,11 @@ def select_deals(frame: pd.DataFrame, *, top=5, max_age_days=7,
             continue
         if any(not _safe_url(row.url, identity[0]) for row in rows):
             excluded["unsafe_or_noncanonical_url"] += 1
+            continue
+        indicated_rights = set().union(*(rights_offer_flags(row.url) for row in rows))
+        if indicated_rights:
+            excluded["nonstandard_rights_indicated"] += 1
+            rights_flags.update(indicated_rights)
             continue
         provenance = [(_boolean(row.is_deal), _boolean(row.seen_in_training), _text(row.partition)) for row in rows]
         if any(deal is None or seen is None or partition not in PARTITIONS for deal, seen, partition in provenance):
@@ -262,6 +268,14 @@ def select_deals(frame: pd.DataFrame, *, top=5, max_age_days=7,
         "as_of": moment.isoformat(), "supported_sources": sorted(SOURCES),
         "not_shown_due_to_top": len(ranked) - len(result),
         "stored_quality_annotations_recomputed": bool(set(RESERVED).intersection(raw.columns)),
+        "rights_filter": {
+            "method": "decoded Polish-normalized URL slug indicators",
+            "excluded_listings": int(excluded["nonstandard_rights_indicated"]),
+            "flag_counts": dict(sorted(rights_flags.items())),
+            "interpretation": "review indicators of fractional ownership or housing participation; not legal conclusions",
+            "limitations": "slug only; descriptions and legal documents not checked; missing indicators do not establish whole-apartment ownership",
+            "ancillary_share_policy": "plot, access-road and garden shares alone do not imply a fractional apartment",
+        },
         "interpretation": "model price-gap candidates; no validated saving, availability or transaction value",
     }
     return result, report
@@ -281,6 +295,8 @@ def _display(value, fallback="unknown"):
 def format_deals(selected, report):
     """Format plain terminal links without implying guaranteed savings."""
     lines = ["Offers ranked by model price gap"]
+    if "ranking_status" in selected and selected.ranking_status.astype("string").str.casefold().eq("experimental").any():
+        lines.append("Ranking status: EXPERIMENTAL")
     lines.append(f"Showing {len(selected)} of {report.get('eligible_listings', len(selected))} eligible offers")
     if selected.empty:
         lines.append("No eligible offers under the current filters.")
