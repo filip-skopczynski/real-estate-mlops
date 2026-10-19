@@ -12,7 +12,7 @@ from urllib.parse import unquote, urlsplit
 SHARE_WORDS = {"udzial", "udzialu", "udzialy", "udzialow", "udzialem", "udzialami", "udzialach"}
 ANCILLARY = {"grunt", "gruncie", "gruntu", "drodze", "drogi", "droga", "ogrod", "ogrodzie", "ogrodu", "ogrodku", "ogrodka"}
 DWELLING = {"mieszkanie", "mieszkaniu", "mieszkania", "lokal", "lokalu", "kawalerka", "kawalerce", "kawalerki"}
-SALE_WORDS = {"sprzedaz", "sprzedazy", "sprzedam", "sprzedaje", "sprzedania", "odsprzedaz", "odsprzedam"}
+SALE_WORDS = {"sprzedaz", "sprzedazy", "sprzedam", "sprzedaje", "sprzeda", "sprzedania", "odsprzedaz", "odsprzedam"}
 
 
 def rights_offer_flags(url) -> set[str]:
@@ -60,7 +60,12 @@ def rights_offer_flags(url) -> set[str]:
                 fraction = True
         dwelling_share = any(tail[position] in {"w", "we"} and tail[position + 1] in DWELLING
                              for position in range(len(tail) - 1))
+        # A share in ownership/cooperative rights to an apartment is also a
+        # fractional offer. Require an explicit dwelling, not a land/road right.
+        dwelling_rights_share = bool(re.search(
+            r"(?:^| )(?:w|we) (?:(?:spoldzielczym )?wlasnosciowym prawie|prawie wlasnosci) "
+            r"(?:do )?(?:lokalu|mieszkania)(?: |$)", " ".join(tail)))
         sale_share = index > 0 and tokens[index - 1] in SALE_WORDS
-        if fraction or dwelling_share or sale_share:
+        if fraction or dwelling_share or dwelling_rights_share or sale_share:
             flags.add("partial_ownership_indicated")
     return flags

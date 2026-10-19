@@ -23,6 +23,10 @@ def url(slug, source="otodom"):
     "sprzedam-udzial-w-mieszkaniu", "udzial-w-mieszkaniu-na-mokotowie",
     "udział-1-2-w-mieszkaniu", "SPRZEDAŻ-UDZIAŁU-W-MIESZKANIU",
     "udzial-1-2-w-mieszkaniu-z-udzialem-w-gruncie",
+    "syndyk-sprzeda-udzial-we-wlasnosciowym-prawie-do-lokalu",
+    "udzial-we-wlasnosciowym-prawie-do-lokalu",
+    "udzial-w-spoldzielczym-wlasnosciowym-prawie-do-lokalu",
+    "udzial-w-prawie-wlasnosci-mieszkania",
 ])
 def test_share_in_apartment_wording_has_explicit_partial_ownership_flag(source, slug):
     assert rights_offer_flags(url(slug, source)) == {PARTIAL}
@@ -57,6 +61,10 @@ def test_utf8_percent_encoded_slug_and_unicode_spelling_have_the_same_meaning(sl
     "mieszkanie-z-udzialem-w-ogrodzie", "mieszkanie-z-ogrodkiem",
     "kawalerka-21-m2-warszawa", "mieszkanie-1-2-pokoje-na-sprzedaz",
     "mieszkanie-od-tbspecjalisty",
+    "syndyk-sprzeda-mieszkanie-z-udzialem-w-gruncie",
+    "mieszkanie-z-udzialem-w-prawie-wlasnosci-gruntu",
+    "sprzeda-udzial-w-drodze-dojazdowej",
+    "sprzeda-udzial-we-wlasnosci-gruntu",
 ])
 def test_standard_flat_shared_land_road_and_garden_wording_is_not_rejected(source, slug):
     assert rights_offer_flags(url(slug, source)) == set()

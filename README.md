@@ -315,3 +315,7 @@ Offline tests exercise parsing, bounded network behaviour, database price histor
 4. Add model version/promotion rules, data freshness checks and a small prediction API when the data/model are reliable.
 
 The portal catalogue job runs daily with a Sunday broad refresh; the complete Bemovo inventory pilot still runs manually. The chosen scope uses Python collectors and XGBoost without an LLM agent or OpenAI API integration, aiming to stay within free service allowances. Portal capture does not trigger model training.
+
+## Offers website
+
+The private [Warsaw Deal Hunter website](https://warsaw-deal-hunter-filip.filipskopczynski.chatgpt.site) displays a curated offer ranking with original listing links, asking prices, experimental model estimates and observation times. Authorized viewers sign in through the hosting access gate. The **Warsaw offers website feed** workflow follows successful catalogue collection, reads current Supabase data and reuses the saved model without retraining. It publishes only a curated JSON feed when website credentials and `WEBSITE_ENABLED` are configured. Feed freshness and listing observation time are shown separately; neither establishes present availability or verified savings. The local `data/deals.csv` remains a separate saved ranking. See [website setup and update behaviour](docs/WEBSITE.md) and the retained [hosting source template](web/hosting/README.md).
