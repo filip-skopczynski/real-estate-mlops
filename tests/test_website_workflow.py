@@ -52,9 +52,11 @@ def test_only_curated_feed_is_uploaded_and_secrets_are_scoped_to_publisher():
     assert len(publishers) == 1
     publish = publishers[0]
     assert set(publish["env"]) == {
-        "DATABASE_URL", "WEBSITE_URL", "WEBSITE_INGEST_TOKEN", "WEBSITE_SERVICE_TOKEN",
+        "DATABASE_URL", "WEBSITE_URL", "WEBSITE_INGEST_TOKEN", "WEBSITE_SERVICE_TOKEN", "WEBSITE_PROVIDER",
     }
     assert "--download-model" in publish["run"]
+    assert publish["env"]["WEBSITE_PROVIDER"] == "${{ vars.WEBSITE_PROVIDER || 'sites' }}"
+    assert '--provider "$WEBSITE_PROVIDER"' in publish["run"]
     assert '--publish-url "$WEBSITE_URL"' in publish["run"]
     for step in job["steps"]:
         if step is not publish:

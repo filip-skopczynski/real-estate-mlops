@@ -1,5 +1,7 @@
 # Warsaw offers website
 
+For deployment to your own public Cloudflare Workers account, see [the direct Cloudflare guide](../web/cloudflare/README.md). That version uses D1 and does not require ChatGPT viewer sign-in. It is prepared separately from the existing private Sites deployment; configuring code alone does not publish it or change the live publisher destination. Set `WEBSITE_PROVIDER=cloudflare` only after bootstrap and verification. The existing deployment remains the default `sites` provider.
+
 The website displays a curated ranking of Warsaw apartments from the project's cloud PostgreSQL catalogue. Each offer shows its asking price, the experimental model estimate, the model price gap, its last observation time and a link to the original advertisement. The page also shows when its feed was generated and which model produced it.
 
 The deployed website is [Warsaw Deal Hunter](https://warsaw-deal-hunter-filip.filipskopczynski.chatgpt.site). It has **private viewer access**: authorized visitors sign in through the hosting access gate. Publishing source code on GitHub does not make this hosted site public. The hosting access gate and the ingestion endpoint's credentials serve different purposes: viewing the page does not grant permission to replace its data or download the saved model.

@@ -1,0 +1,15 @@
+{
+  "name": "warsaw-deal-hunter-cloudflare",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs && wrangler dev --ip 127.0.0.1",
+    "test": "node --test tests/worker.test.mjs",
+    "deploy": "node build.mjs && wrangler deploy",
+    "check": "node build.mjs && wrangler deploy --dry-run"
+  },
+  "devDependencies": { "wrangler": "4.92.0" }
+}

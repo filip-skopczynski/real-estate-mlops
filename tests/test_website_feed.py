@@ -237,14 +237,16 @@ def test_duplicate_csv_headers_rejected(tmp_path):
 
 @pytest.mark.parametrize("origin", ["http://example.com", "https://user:pass@example.com", "https://example.com/path",
     "https://example.com?token=secret", "https://example.com#secret", "https://example.com:444", "https://example.com\n"])
-def test_website_only_accepts_https_origin(monkeypatch, origin):
+@pytest.mark.parametrize("provider", feed.WEBSITE_PROVIDERS)
+def test_website_only_accepts_https_origin(monkeypatch, origin, provider):
     monkeypatch.setenv("WEBSITE_INGEST_TOKEN", "ingest-secret")
     monkeypatch.setenv("WEBSITE_SERVICE_TOKEN", "service-secret")
     with pytest.raises(feed.WebsiteFeedError):
-        feed._website_request(origin, "/api/model")
+        feed._website_request(origin, "/api/model", provider=provider)
 
 
-def test_https_tokens_timeout_and_redirect_policy(monkeypatch):
+@pytest.mark.parametrize("provider", feed.WEBSITE_PROVIDERS)
+def test_https_tokens_timeout_and_redirect_policy(monkeypatch, provider):
     monkeypatch.setenv("WEBSITE_INGEST_TOKEN", "ingest-secret")
     monkeypatch.setenv("WEBSITE_SERVICE_TOKEN", "service-secret")
     response = Mock()
@@ -259,15 +261,98 @@ def test_https_tokens_timeout_and_redirect_policy(monkeypatch):
         policies.extend(handlers)
         return opener
     monkeypatch.setattr(feed, "build_opener", make)
-    feed._website_request("https://example.com/", "/api/ingest/deals", content=b'{}')
+    feed._website_request("https://example.com/", "/api/ingest/deals", content=b'{}', provider=provider)
     request = opener.open.call_args.args[0]
     assert request.full_url == "https://example.com/api/ingest/deals"
     assert request.get_header("Authorization") == "Bearer ingest-secret"
-    assert request.get_header("Oai-sites-authorization") == "Bearer service-secret"
+    assert request.get_header("Oai-sites-authorization") == ("Bearer service-secret" if provider == "sites" else None)
     assert opener.open.call_args.kwargs["timeout"] == 30
     assert len(policies) == 1 and isinstance(policies[0], feed._NoRedirect)
     assert policies[0].redirect_request(None, None, 302, "redirect", {}, "https://evil.example") is None
     response.read.assert_called_once_with(feed.MAX_RESPONSE_BYTES + 1)
+
+
+@pytest.mark.parametrize("service_token", [None, "unrelated-sites-secret", "invalid service secret\n"])
+@pytest.mark.parametrize("content", [None, b'{}'])
+def test_cloudflare_neither_requires_reads_nor_sends_sites_service_token(monkeypatch, service_token, content):
+    monkeypatch.setenv("WEBSITE_INGEST_TOKEN", "ingest-secret")
+    if service_token is None:
+        monkeypatch.delenv("WEBSITE_SERVICE_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("WEBSITE_SERVICE_TOKEN", service_token)
+    getenv = feed.os.getenv
+    def scoped_getenv(name, default=None):
+        assert name != "WEBSITE_SERVICE_TOKEN", "Cloudflare must not access a Sites credential"
+        return getenv(name, default)
+    monkeypatch.setattr(feed.os, "getenv", scoped_getenv)
+    response = Mock(status=200, headers={})
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=False)
+    response.read.return_value = b'{}'
+    opener = Mock()
+    opener.open.return_value = response
+    monkeypatch.setattr(feed, "build_opener", Mock(return_value=opener))
+    assert feed._website_request("https://deals.example.workers.dev", "/api/model" if content is None else "/api/ingest/deals",
+        content=content, provider="cloudflare") == (b'{}', {})
+    request = opener.open.call_args.args[0]
+    assert request.get_header("Authorization") == "Bearer ingest-secret"
+    assert request.get_header("Oai-sites-authorization") is None
+    assert set(name.lower() for name in request.headers) == (
+        {"authorization", "accept"} if content is None else {"authorization", "accept", "content-type"})
+
+
+@pytest.mark.parametrize("provider", feed.WEBSITE_PROVIDERS)
+@pytest.mark.parametrize("ingest_token", [None, "", "has space", "has\nnewline", "has\x7fcontrol"])
+def test_each_provider_requires_valid_ingestion_secret_before_network(monkeypatch, provider, ingest_token):
+    monkeypatch.setenv("WEBSITE_SERVICE_TOKEN", "service-secret")
+    if ingest_token is None:
+        monkeypatch.delenv("WEBSITE_INGEST_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("WEBSITE_INGEST_TOKEN", ingest_token)
+    opener = Mock(side_effect=AssertionError("invalid credentials must not reach the network"))
+    monkeypatch.setattr(feed, "build_opener", opener)
+    with pytest.raises(feed.WebsiteFeedError, match="WEBSITE_INGEST_TOKEN"):
+        feed._website_request("https://example.com", "/api/model", provider=provider)
+    opener.assert_not_called()
+
+
+@pytest.mark.parametrize("service_token", [None, "", "has space", "has\nnewline"])
+def test_default_sites_provider_still_requires_valid_service_secret(monkeypatch, service_token):
+    monkeypatch.setenv("WEBSITE_INGEST_TOKEN", "ingest-secret")
+    if service_token is None:
+        monkeypatch.delenv("WEBSITE_SERVICE_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("WEBSITE_SERVICE_TOKEN", service_token)
+    opener = Mock(side_effect=AssertionError("invalid credentials must not reach the network"))
+    monkeypatch.setattr(feed, "build_opener", opener)
+    with pytest.raises(feed.WebsiteFeedError, match="WEBSITE_SERVICE_TOKEN"):
+        feed._website_request("https://example.com", "/api/model")
+    opener.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", [None, "", "other", "CLOUDFLARE"])
+def test_unknown_provider_is_rejected_before_network(monkeypatch, provider):
+    opener = Mock(side_effect=AssertionError("unknown provider must not reach the network"))
+    monkeypatch.setattr(feed, "build_opener", opener)
+    with pytest.raises(feed.WebsiteFeedError, match="provider must be sites or cloudflare"):
+        feed._website_request("https://example.com", "/api/model", provider=provider)
+    opener.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", feed.WEBSITE_PROVIDERS)
+@pytest.mark.parametrize("status,body", [(201, b'{}'), (302, b'{}'), (200, b'12345')])
+def test_provider_response_must_be_successful_and_bounded(monkeypatch, provider, status, body):
+    monkeypatch.setenv("WEBSITE_INGEST_TOKEN", "ingest-secret")
+    monkeypatch.setenv("WEBSITE_SERVICE_TOKEN", "service-secret")
+    response = Mock(status=status, headers={})
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=False)
+    response.read.return_value = body
+    opener = Mock()
+    opener.open.return_value = response
+    monkeypatch.setattr(feed, "build_opener", Mock(return_value=opener))
+    with pytest.raises(feed.WebsiteFeedError):
+        feed._website_request("https://example.com", "/api/model", provider=provider, limit=4)
 
 
 def test_download_verifies_digest_before_joblib_and_preserves_existing_file(monkeypatch, tmp_path):
@@ -282,13 +367,16 @@ def test_download_verifies_digest_before_joblib_and_preserves_existing_file(monk
     assert model.read_bytes() == b"old trusted model"
 
 
-def test_download_validates_trusted_model_then_atomically_replaces(monkeypatch, tmp_path, artifact):
+@pytest.mark.parametrize("provider", feed.WEBSITE_PROVIDERS)
+def test_download_validates_trusted_model_then_atomically_replaces(monkeypatch, tmp_path, artifact, provider):
     buffer = io.BytesIO()
     joblib.dump(artifact, buffer)
     content = buffer.getvalue()
-    monkeypatch.setattr(feed, "_website_request", lambda *a, **kw: (content, {"X-Model-SHA256": hashlib.sha256(content).hexdigest()}))
+    request = Mock(return_value=(content, {"X-Model-SHA256": hashlib.sha256(content).hexdigest()}))
+    monkeypatch.setattr(feed, "_website_request", request)
     model = tmp_path / "model.joblib"
-    feed.download_model("https://example.com", model)
+    feed.download_model("https://example.com", model, provider=provider)
+    request.assert_called_once_with("https://example.com", "/api/model", limit=feed.MAX_MODEL_BYTES, provider=provider)
     assert model.read_bytes() == content
     assert list(tmp_path.iterdir()) == [model]
 
@@ -302,20 +390,23 @@ def test_network_failure_never_exposes_tokens_or_remote_error(monkeypatch):
     assert all(secret not in str(error.value) for secret in ("ingest-secret", "service-secret", "private response"))
 
 
-def test_publication_requires_exact_json_acknowledgment(artifact, monkeypatch):
+@pytest.mark.parametrize("provider", feed.WEBSITE_PROVIDERS)
+def test_publication_requires_exact_json_acknowledgment(artifact, monkeypatch, provider):
     payload = feed.build_payload(pd.DataFrame([listing()]), artifact, DIGEST, now=NOW)
     ack = dict(ok=True, generated_at=payload["generated_at"], model_sha256=DIGEST, offers=1)
     request = Mock(return_value=(json.dumps(ack).encode("utf-8"), {}))
     monkeypatch.setattr(feed, "_website_request", request)
-    feed.publish_payload(payload, "https://example.com")
+    feed.publish_payload(payload, "https://example.com", provider=provider)
     assert request.call_args.args == ("https://example.com", "/api/ingest/deals")
     assert json.loads(request.call_args.kwargs["content"]) == payload
+    assert request.call_args.kwargs["provider"] == provider
 
 
 @pytest.mark.parametrize("ack", [b"<html>Please sign in</html>", b"\xff", b"[]", b"null", b'{}',
     {"ok": False}, {"ok": 1}, {"generated_at": "2026-10-19T00:00:00Z"},
     {"model_sha256": "b" * 64}, {"offers": 0}, {"offers": True}, {"offers": 1.0}])
-def test_false_or_mismatched_http_200_ack_does_not_report_publication_success(artifact, monkeypatch, ack):
+@pytest.mark.parametrize("provider", feed.WEBSITE_PROVIDERS)
+def test_false_or_mismatched_http_200_ack_does_not_report_publication_success(artifact, monkeypatch, ack, provider):
     payload = feed.build_payload(pd.DataFrame([listing()]), artifact, DIGEST, now=NOW)
     valid = dict(ok=True, generated_at=payload["generated_at"], model_sha256=DIGEST, offers=1)
     if isinstance(ack, dict):
@@ -325,4 +416,32 @@ def test_false_or_mismatched_http_200_ack_does_not_report_publication_success(ar
         raw = ack
     monkeypatch.setattr(feed, "_website_request", lambda *args, **kwargs: (raw, {}))
     with pytest.raises(feed.WebsiteFeedError, match="exact feed"):
-        feed.publish_payload(payload, "https://example.com")
+        feed.publish_payload(payload, "https://example.com", provider=provider)
+
+
+@pytest.mark.parametrize("provider_args,expected_provider", [([], "sites"), (["--provider", "sites"], "sites"),
+    (["--provider", "cloudflare"], "cloudflare")])
+def test_cli_passes_provider_to_model_download_and_feed_publication(tmp_path, artifact, monkeypatch,
+    provider_args, expected_provider):
+    model, catalog, output = tmp_path / "model.joblib", tmp_path / "catalog.csv", tmp_path / "deals.json"
+    pd.DataFrame([listing(observed_at=datetime.now(timezone.utc) - timedelta(hours=1))]).to_csv(catalog, index=False)
+    download = Mock(side_effect=lambda origin, path, **kwargs: joblib.dump(artifact, path))
+    publish = Mock()
+    monkeypatch.setattr(feed, "download_model", download)
+    monkeypatch.setattr(feed, "publish_payload", publish)
+    assert feed.main(["--model", str(model), "--catalog", str(catalog), "--output", str(output),
+        "--publish-url", "https://example.com", "--download-model", *provider_args]) == 0
+    download.assert_called_once_with("https://example.com", model, provider=expected_provider)
+    publish.assert_called_once_with(json.loads(output.read_text(encoding="utf-8")), "https://example.com",
+        provider=expected_provider)
+
+
+def test_cli_rejects_unknown_provider_before_model_or_database_access(monkeypatch, capsys):
+    forbidden = Mock(side_effect=AssertionError("unknown provider must fail during argument parsing"))
+    monkeypatch.setattr(feed, "load_model", forbidden)
+    monkeypatch.setattr(feed, "read_catalog", forbidden)
+    with pytest.raises(SystemExit) as error:
+        feed.main(["--provider", "other"])
+    assert error.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+    forbidden.assert_not_called()

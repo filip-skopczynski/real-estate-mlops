@@ -1,0 +1,8 @@
+/node_modules/
+/public/
+/.wrangler/
+/dist/
+/wrangler.account.json
+.dev.vars*
+.env*
+*.log

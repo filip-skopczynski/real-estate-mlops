@@ -45,9 +45,11 @@ jobs:
           WEBSITE_URL: ${{ vars.WEBSITE_URL }}
           WEBSITE_INGEST_TOKEN: ${{ secrets.WEBSITE_INGEST_TOKEN }}
           WEBSITE_SERVICE_TOKEN: ${{ secrets.WEBSITE_SERVICE_TOKEN }}
+          WEBSITE_PROVIDER: ${{ vars.WEBSITE_PROVIDER || 'sites' }}
         run: >-
           python -m src.website_feed
           --download-model
+          --provider "$WEBSITE_PROVIDER"
           --publish-url "$WEBSITE_URL"
           --output data/website/deals.json
       - name: Upload curated website feed

@@ -34,6 +34,7 @@ MAX_FEED_BYTES = 512 * 1024
 MAX_RESPONSE_BYTES = 4096
 MAX_CSV_BYTES = 32 * 1024 * 1024
 NETWORK_TIMEOUT = 30
+WEBSITE_PROVIDERS = ("sites", "cloudflare")
 
 
 class WebsiteFeedError(ValueError):
@@ -222,20 +223,29 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def _website_request(origin, endpoint, *, content=None, limit=MAX_RESPONSE_BYTES):
+def _website_request(origin, endpoint, *, content=None, limit=MAX_RESPONSE_BYTES, provider="sites"):
     """Authenticated HTTPS request; tokens never follow a redirect or enter logs."""
     try:
+        if provider not in WEBSITE_PROVIDERS:
+            raise WebsiteFeedError("Website provider must be sites or cloudflare.")
         parsed = urlsplit(origin)
         if (not isinstance(origin, str) or re.search(r"[\x00-\x20\x7f-\x9f\\]", origin)
                 or parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
                 or parsed.password is not None or parsed.port not in (None, 443)
                 or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
             raise WebsiteFeedError("--publish-url must be a plain HTTPS website origin without a path or credentials.")
-        tokens = [os.getenv("WEBSITE_INGEST_TOKEN", ""), os.getenv("WEBSITE_SERVICE_TOKEN", "")]
-        if any(not token or re.search(r"[\x00-\x20\x7f-\x9f]", token) for token in tokens):
-            raise WebsiteFeedError("Set valid WEBSITE_INGEST_TOKEN and WEBSITE_SERVICE_TOKEN secrets before website requests.")
-        headers = {"Authorization": "Bearer " + tokens[0], "OAI-Sites-Authorization": "Bearer " + tokens[1],
+        ingest_token = os.getenv("WEBSITE_INGEST_TOKEN", "")
+        if not ingest_token or re.search(r"[\x00-\x20\x7f-\x9f]", ingest_token):
+            raise WebsiteFeedError("Set a valid WEBSITE_INGEST_TOKEN secret before website requests.")
+        headers = {"Authorization": "Bearer " + ingest_token,
                    "Accept": "application/json" if content is not None else "application/octet-stream"}
+        # A Sites service token authorizes only Sites hosting. Never read or send
+        # that credential when publishing to the independently hosted Worker.
+        if provider == "sites":
+            service_token = os.getenv("WEBSITE_SERVICE_TOKEN", "")
+            if not service_token or re.search(r"[\x00-\x20\x7f-\x9f]", service_token):
+                raise WebsiteFeedError("Set a valid WEBSITE_SERVICE_TOKEN secret before Sites requests.")
+            headers["OAI-Sites-Authorization"] = "Bearer " + service_token
         if content is not None:
             headers["Content-Type"] = "application/json"
         request = Request(origin.rstrip("/") + endpoint, data=content, headers=headers, method="POST" if content is not None else "GET")
@@ -252,8 +262,8 @@ def _website_request(origin, endpoint, *, content=None, limit=MAX_RESPONSE_BYTES
         raise WebsiteFeedError("Website request failed. Check the HTTPS address, service access and ingestion secrets; private details are not logged.") from None
 
 
-def download_model(origin, path):
-    content, headers = _website_request(origin, "/api/model", limit=MAX_MODEL_BYTES)
+def download_model(origin, path, *, provider="sites"):
+    content, headers = _website_request(origin, "/api/model", limit=MAX_MODEL_BYTES, provider=provider)
     expected = headers.get("X-Model-SHA256", "")
     actual = hashlib.sha256(content).hexdigest()
     if not content or not re.fullmatch(r"[a-f0-9]{64}", expected) or expected != actual:
@@ -269,8 +279,8 @@ def download_model(origin, path):
     _atomic_write(path, content)
 
 
-def publish_payload(payload, origin):
-    raw, _ = _website_request(origin, "/api/ingest/deals", content=encode_payload(payload))
+def publish_payload(payload, origin, *, provider="sites"):
+    raw, _ = _website_request(origin, "/api/ingest/deals", content=encode_payload(payload), provider=provider)
     try:
         acknowledgment = json.loads(raw.decode("utf-8"))
         if (not isinstance(acknowledgment, dict) or acknowledgment.get("ok") is not True
@@ -290,6 +300,8 @@ def main(argv=None):
     parser.add_argument("--model", type=Path, default=PROJECT_ROOT / "models/model.joblib")
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "data/website/deals.json")
     parser.add_argument("--publish-url", help="HTTPS website origin to receive the authenticated feed.")
+    parser.add_argument("--provider", choices=WEBSITE_PROVIDERS, default="sites",
+                        help="Website hosting provider; Cloudflare requires only the ingestion secret (default: sites).")
     parser.add_argument("--download-model", action="store_true", help="Restore the trusted model from the authenticated website endpoint.")
     args = parser.parse_args(argv)
     try:
@@ -300,7 +312,7 @@ def main(argv=None):
                 raise WebsiteFeedError("--download-model requires --publish-url.")
             if args.catalog is not None and args.model.resolve() == args.catalog.resolve():
                 raise WebsiteFeedError("Downloaded model must not overwrite the catalogue input.")
-            download_model(args.publish_url, args.model)
+            download_model(args.publish_url, args.model, provider=args.provider)
         artifact, digest = load_model(args.model)
         if args.catalog is not None:
             catalog, capture = read_csv_catalog(args.catalog), datetime.now(timezone.utc)
@@ -309,7 +321,7 @@ def main(argv=None):
         payload = build_payload(catalog, artifact, digest, now=capture)
         _atomic_write(args.output, encode_payload(payload))
         if args.publish_url:
-            publish_payload(payload, args.publish_url)
+            publish_payload(payload, args.publish_url, provider=args.provider)
     except (WebsiteFeedError, ValueError, OSError):
         print("Website feed could not be refreshed. Check model provenance, catalogue input, database access and website configuration; private details are not logged.")
         return 2
